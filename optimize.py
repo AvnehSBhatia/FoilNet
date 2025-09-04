@@ -599,7 +599,6 @@ def save_dat_file_only(best_optimized_airfoil, best_shape_name, optimizer):
     aero_data = best_optimized_airfoil['aerodynamic_data']
     
     # Reduce to 999 points by removing points with lowest concavity
-    x_coords_999, y_coords_999 = reduce_to_999_points(x_coords, y_coords)
     
     # Extract base NACA code from shape name for AF format
     if ' ' in best_shape_name:
@@ -613,28 +612,22 @@ def save_dat_file_only(best_optimized_airfoil, best_shape_name, optimizer):
     dat_filename = f"{filename_base}.dat"
     with open(dat_filename, 'w') as f:
         f.write(f"AF{base_code} Airfoil\n")
-        f.write(f"Peak L/D = {fitness:.3f}\n")
+        f.write(f"Peak L/D = {aero_data['CL']/aero_data['CD']:.3f} \n")
         f.write(f"Peak CL = {aero_data['CL']:.4f}\n")
         f.write(f"Peak CD = {aero_data['CD']:.4f}\n")
         f.write(f"Peak Angle = {aero_data['peak_alpha']:.2f}°\n")
         f.write(f"Reynolds Number = {optimizer.reynolds_number:.0f}\n")
-        f.write(f"999\n")
+        f.write(f"1024\n")
         
-        for i in range(len(x_coords_999)):
-            f.write(f"{x_coords_999[i]:.6f} {y_coords_999[i]:.6f}\n")
+        for i in range(len(x_coords)):
+            f.write(f"{x_coords[i]:.6f} {y_coords[i]:.6f}\n")
     
-    print(f"   DAT file saved as: {dat_filename}")
-    print(f"   Reduced from {len(x_coords)} to 999 points by removing lowest concavity")
-    
+    print(f"   DAT file saved as: {dat_filename}")    
     dxf_filename = f"{filename_base}.dxf"
     convert_dat_to_dxf(dat_filename, dxf_filename, best_shape_name, fitness)
     
     print(f"DAT and DXF files saved successfully!")
 
-def reduce_to_999_points(x_coords, y_coords):
-    """Reduce coordinates to 999 points by removing points with lowest concavity"""
-    if len(x_coords) <= 999:
-        return x_coords, y_coords
     
     # Calculate concavity (second derivative approximation) for each point
     concavities = []
