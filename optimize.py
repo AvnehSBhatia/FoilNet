@@ -608,11 +608,11 @@ def save_dat_file_only(best_optimized_airfoil, best_shape_name, optimizer):
         base_code = best_shape_name
     
     # Create AF filename (AF + base code)
-    filename_base = f"AF{base_code}"
+    filename_base = f"AF{int(round(optimizer.reynolds_number / 1000, 0))}k"
     
     dat_filename = f"{filename_base}.dat"
     with open(dat_filename, 'w') as f:
-        f.write(f"AF{base_code} Airfoil\n")
+        f.write(f"{filename_base} Airfoil\n")
         f.write(f"Peak L/D = {aero_data['CL']/aero_data['CD']:.3f} \n")
         f.write(f"Peak CL = {aero_data['CL']:.4f}\n")
         f.write(f"Peak CD = {aero_data['CD']:.4f}\n")
