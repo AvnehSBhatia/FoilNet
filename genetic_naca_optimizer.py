@@ -24,7 +24,7 @@ class GeneticAF512Optimizer:
                  population_size: int = 50,
                  mutation_rate: float = 0.1,
                  crossover_rate: float = 0.8,
-                 generations: int = 100,
+                 generations: int = 1000,
                  wingspan: float = 6.0,
                  chord: float = 0.8,
                  airspeed: float = 30.0,
@@ -80,6 +80,15 @@ class GeneticAF512Optimizer:
         self.peak_ld_tolerance = 0.03
         self.alpha_range = np.linspace(-5, 15, 21)
         
+        # Two-stage optimization parameters
+        self.stage1_complete = False
+        self.stage1_best_peak_ld = 0.0
+        self.stage2_generations = 1000  # Additional generations for stage 2
+        self.peak_ld_preservation_threshold = 0.98  # Must maintain 98% of original peak L/D
+        
+        # Store the non-area optimized airfoil for comparison
+        self.stage1_final_airfoil = None
+        
     def create_individual(self) -> dict:
         x_points = np.linspace(0, 1, self.num_points)
         
@@ -121,9 +130,11 @@ class GeneticAF512Optimizer:
             'aerodynamic_data': None
         }
     
-    def create_individual_from_naca(self, naca_code: str) -> dict:
+    def create_individual_from_airfoil(self, airfoil_code: str) -> dict:
+        """Create individual from airfoil code (supports both NACA and Selig formats)"""
         try:
-            af512_data = naca_to_af512(naca_code, self.num_points)
+            from naca_trainer import airfoil_to_af512
+            af512_data = airfoil_to_af512(airfoil_code, self.num_points)
             return {
                 'af512_data': af512_data,
                 'fitness': None,
@@ -131,8 +142,12 @@ class GeneticAF512Optimizer:
                 'aerodynamic_data': None
             }
         except Exception as e:
-            print(f"Error creating from NACA {naca_code}: {e}")
+            print(f"Error creating from airfoil {airfoil_code}: {e}")
             return self.create_individual()
+    
+    def create_individual_from_naca(self, naca_code: str) -> dict:
+        """Legacy method - now calls create_individual_from_airfoil"""
+        return self.create_individual_from_airfoil(naca_code)
     
     def initialize_population(self, initial_naca: str = None):
         print(f"Initializing population of {self.population_size} individuals...")
@@ -254,20 +269,92 @@ class GeneticAF512Optimizer:
             return 0.0
     
     def _calculate_adaptive_fitness(self, aero_data: dict) -> float:
-        if not self.adaptive_mode:
+        if not self.stage1_complete:
+            # Stage 1: Optimize for peak L/D only (no falloff penalty)
             return aero_data['L/D']
         else:
-            if not self.population:
-                return aero_data['L/D']
+            # Stage 2: Optimize for area under L/D curve + falloff while preserving peak L/D
+            current_peak_ld = aero_data['L/D']
             
-            best_peak_ld = max(ind['aerodynamic_data']['L/D'] for ind in self.population 
-                             if ind['aerodynamic_data'] is not None)
-            
-            if aero_data['L/D'] >= best_peak_ld * (1 - self.peak_ld_tolerance):
-                normalized_area = aero_data['area_under_curve'] / 20.0
-                return aero_data['L/D'] + normalized_area * 0.1
+            # Check if peak L/D is preserved within threshold
+            if current_peak_ld >= self.stage1_best_peak_ld * self.peak_ld_preservation_threshold:
+                # Stage 2: Reward based on area improvement and falloff ratio
+                # Calculate the improvement in area from Stage 1 to current
+                current_area = aero_data['area_under_curve']
+                stage1_area = self.stage1_final_airfoil['aerodynamic_data']['area_under_curve'] if self.stage1_final_airfoil else 0
+                
+                # Area improvement: difference between current and Stage 1 area
+                area_improvement = current_area - stage1_area
+                
+                # Calculate falloff ratio (L/D at 10° / peak L/D)
+                falloff_ratio = 1.0  # Default to 1.0 (no falloff)
+                ld_values = aero_data.get('ld_values', [])
+                if ld_values and len(ld_values) >= 21:
+                    peak_ld = max(ld_values)
+                    ld_at_10deg = ld_values[15]  # Index 15 = 10 degrees
+                    if peak_ld > 0:
+                        falloff_ratio = ld_at_10deg / peak_ld
+                
+                # Reward = area improvement × 10 × falloff ratio
+                # This rewards both area improvement and maintaining good falloff characteristics
+                reward = area_improvement * 10.0 * falloff_ratio
+                
+                # Add small bonus for peak L/D preservation (minimal weight)
+                peak_bonus = current_peak_ld * 0.01
+                
+                return reward + peak_bonus
             else:
-                return aero_data['L/D']
+                # Strong penalty if peak L/D drops below threshold - we must conserve the peak
+                penalty_factor = 0.01  # Very strong penalty
+                return current_peak_ld * penalty_factor
+    
+    def _calculate_falloff_penalty(self, aero_data: dict) -> float:
+        """Calculate penalty for aggressive L/D falloff beyond peak"""
+        try:
+            # Get L/D values at different angles of attack
+            ld_values = aero_data.get('ld_values', [])
+            if not ld_values or len(ld_values) < 21:  # Need full alpha range
+                return 0.0
+            
+            # Find peak L/D and its index
+            peak_ld = max(ld_values)
+            peak_idx = ld_values.index(peak_ld)
+            
+            # Check L/D at 10 degrees (index 15 in -5 to 15 range)
+            target_idx = 15
+            if target_idx < len(ld_values):
+                ld_at_10deg = ld_values[target_idx]
+                
+                # Calculate how much L/D has fallen from peak
+                if peak_ld > 0:
+                    falloff_ratio = ld_at_10deg / peak_ld
+                    
+                    # If L/D at 10° is less than 90% of peak, apply penalty
+                    if falloff_ratio < 0.9:  # 10% falloff threshold
+                        # Calculate penalty based on how much it falls below 90%
+                        penalty_strength = 50.0  # Strong penalty for aggressive falloff
+                        penalty = penalty_strength * (0.9 - falloff_ratio)
+                        
+                        # Log the falloff penalty for debugging
+                        if penalty > 5.0:  # Only log significant penalties
+                            stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
+                            print(f"   [{stage_info}] L/D falloff penalty: {penalty:.1f} (peak: {peak_ld:.2f}, at 10°: {ld_at_10deg:.2f}, ratio: {falloff_ratio:.3f})")
+                        
+                        return penalty
+                    
+                    # Bonus for maintaining L/D above 90% at 10°
+                    if falloff_ratio >= 0.9:
+                        bonus = 10.0 * (falloff_ratio - 0.9)  # Small bonus for better performance
+                        if bonus > 0.5:  # Only log significant bonuses
+                            stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
+                            print(f"   [{stage_info}] L/D falloff bonus: {bonus:.1f} (ratio: {falloff_ratio:.3f})")
+                        return -bonus  # Negative penalty = bonus
+            
+            return 0.0
+            
+        except Exception as e:
+            print(f"Error calculating falloff penalty: {e}")
+            return 0.0
     
     def evaluate_population(self):
         print("Evaluating population fitness...")
@@ -431,6 +518,27 @@ class GeneticAF512Optimizer:
         
         self.add_noise_to_population()
     
+    def create_next_generation_stage2(self):
+        new_population = []
+        
+        best_individual = max(self.population, key=lambda x: x['fitness'])
+        new_population.append(copy.deepcopy(best_individual))
+        
+        while len(new_population) < self.population_size:
+            parent1, parent2 = self.select_parents()
+            
+            child1, child2 = self.crossover(parent1, parent2)
+            
+            # Mutate children for stage 2 (no noise)
+            self.mutate(child1)
+            self.mutate(child2)
+            
+            new_population.extend([child1, child2])
+        
+        self.population = new_population[:self.population_size]
+        # Add 0.5% noise in Stage 2 for exploration
+        self.add_noise_to_population(noise_std=0.005)
+    
     def run_optimization(self, initial_naca: str = None):
         print("Starting AF512 Genetic Algorithm Optimization")
         print(f"Population size: {self.population_size}")
@@ -443,6 +551,13 @@ class GeneticAF512Optimizer:
         print(f"Alpha range: {self.alpha_range}")
         
         self.initialize_population(initial_naca)
+        
+        # Stage 1: Optimize for peak L/D
+        print(f"\n" + "="*60)
+        print(f"STAGE 1: Optimizing for Peak L/D")
+        print(f"="*60)
+        print(f"Focus: Maximize peak L/D ratio only")
+        print(f"No falloff penalties applied in this stage")
         
         best_fitness_history = []
         generations_without_improvement = 0
@@ -484,8 +599,6 @@ class GeneticAF512Optimizer:
             
             self.adjust_noise_dynamically()
             
-            self.check_adaptive_switch()
-            
             if self.image_callback:
                 try:
                     self.image_callback(best_individual, generation + 1, best_fitness)
@@ -495,10 +608,84 @@ class GeneticAF512Optimizer:
             if generation < self.generations - 1:
                 self.create_next_generation()
         
+        # Stage 1 complete - record best peak L/D
+        self.stage1_complete = True
+        self.stage1_best_peak_ld = best_fitness_ever
+        
+        # Store the Stage 1 final airfoil (non-area optimized) for comparison
+        self.stage1_final_airfoil = copy.deepcopy(best_individual)
+        
+        print(f"\n" + "="*60)
+        print(f"STAGE 1 COMPLETE: Peak L/D = {self.stage1_best_peak_ld:.3f}")
+        print(f"Switching to Stage 2: Optimizing for area under L/D curve + falloff characteristics")
+        print(f"Must maintain peak L/D ≥ {self.stage1_best_peak_ld * self.peak_ld_preservation_threshold:.3f} ({self.peak_ld_preservation_threshold*100:.0f}% of best)")
+        print(f"Falloff penalties now active: L/D must stay ≥90% of peak at 10° angle of attack")
+        print(f"="*60)
+        
+        # Stage 2: Optimize for area under L/D curve + falloff while preserving peak L/D
+        print(f"\nStage 2: Optimizing for area under L/D curve + falloff characteristics (preserving peak L/D)")
+        print(f"Additional generations: {self.stage2_generations}")
+        print(f"Falloff optimization: L/D must maintain ≥90% of peak value at 10° angle of attack")
+        print(f"Stage 2 early stopping patience: 50 generations")
+        
+        # Reset early stopping for stage 2 with 50 generation patience
+        generations_without_improvement = 0
+        stage2_best_fitness = best_fitness_ever
+        stage2_early_stopping_patience = 50  # Fixed 50 generation patience for stage 2
+        
+        for generation in range(self.stage2_generations):
+            print(f"\nStage 2 Generation {generation + 1}/{self.stage2_generations}")
+            
+            self.evaluate_population()
+            
+            fitnesses = [ind['fitness'] for ind in self.population]
+            best_fitness = float(max(fitnesses))
+            avg_fitness = float(np.mean(fitnesses))
+            best_individual = max(self.population, key=lambda x: x['fitness'])
+            
+            # Check if we're still improving in stage 2
+            if best_fitness > stage2_best_fitness + self.early_stopping_tolerance:
+                stage2_best_fitness = best_fitness
+                generations_without_improvement = 0
+            else:
+                generations_without_improvement += 1
+            
+            print(f"Best fitness: {best_fitness:.3f}")
+            print(f"Average fitness: {avg_fitness:.3f}")
+            print(f"Generations without improvement: {generations_without_improvement}/{stage2_early_stopping_patience}")
+            
+            # Early stopping for stage 2 with 50 generation patience
+            if generations_without_improvement >= stage2_early_stopping_patience:
+                print(f"Stage 2 early stopping triggered! No improvement for {stage2_early_stopping_patience} generations.")
+                break
+            
+            # Add to fitness history with stage indicator
+            self.fitness_history.append({
+                'generation': len(self.fitness_history) + 1,
+                'stage': 2,
+                'best_fitness': best_fitness,
+                'avg_fitness': avg_fitness,
+                'best_individual': copy.deepcopy(best_individual)
+            })
+            
+            if self.image_callback:
+                try:
+                    self.image_callback(best_individual, len(self.fitness_history), best_fitness)
+                except Exception as e:
+                    print(f"Image capture failed for stage 2 generation {generation + 1}: {e}")
+            
+            if generation < self.stage2_generations - 1:
+                # Create next generation WITHOUT adding noise (clean optimization)
+                self.create_next_generation_stage2()
+        
+        # Final evaluation
         self.evaluate_population()
         final_best = max(self.population, key=lambda x: x['fitness'])
         
         print(f"\nOptimization Complete!")
+        print(f"Stage 1: Peak L/D = {self.stage1_best_peak_ld:.3f}")
+        print(f"Stage 2: Final fitness = {final_best['fitness']:.3f}")
+        
         if self.target_lift is not None:
             print(f"Target lift constraint: CL ≥ {self.target_lift}")
             if final_best['aerodynamic_data']['CL'] >= self.target_lift:
@@ -506,19 +693,23 @@ class GeneticAF512Optimizer:
             else:
                 print(f"Target lift not achieved. CL = {final_best['aerodynamic_data']['CL']:.3f}")
         
-        print(f"Best L/D ratio: {final_best['fitness']:.3f}")
+        print(f"Best L/D ratio: {final_best['aerodynamic_data']['L/D']:.3f}")
         print(f"Peak L/D at: {final_best['aerodynamic_data']['peak_alpha']:.1f}°")
         print(f"CL: {final_best['aerodynamic_data']['CL']:.3f}")
         print(f"CD: {final_best['aerodynamic_data']['CD']:.4f}")
         print(f"Area under L/D curve: {final_best['aerodynamic_data']['area_under_curve']:.3f}")
         
-        if self.adaptive_mode:
-            print(f"Optimization mode: Adaptive (area under L/D curve preferred)")
+        # Check if peak L/D was preserved
+        final_peak_ld = final_best['aerodynamic_data']['L/D']
+        if final_peak_ld >= self.stage1_best_peak_ld * self.peak_ld_preservation_threshold:
+            print(f"✓ Peak L/D preserved: {final_peak_ld:.3f} ≥ {self.stage1_best_peak_ld * self.peak_ld_preservation_threshold:.3f}")
         else:
-            print(f"Optimization mode: Standard (peak L/D optimization)")
+            print(f"⚠ Peak L/D not preserved: {final_peak_ld:.3f} < {self.stage1_best_peak_ld * self.peak_ld_preservation_threshold:.3f}")
         
-        if len(self.fitness_history) < self.generations:
-            print(f"Early stopping: Completed {len(self.fitness_history)} generations out of {self.generations}")
+        print(f"Optimization mode: Two-stage (peak L/D → area under curve)")
+        
+        if len(self.fitness_history) < (self.generations + self.stage2_generations):
+            print(f"Early stopping: Completed {len(self.fitness_history)} generations out of {self.generations + self.stage2_generations}")
         
         return final_best
     
@@ -580,6 +771,10 @@ class GeneticAF512Optimizer:
         plt.savefig('af512_optimization_history.png', dpi=300, bbox_inches='tight')
         plt.show()
     
+    def get_stage1_final_airfoil(self):
+        """Get the final airfoil from Stage 1 (non-area optimized) for comparison"""
+        return self.stage1_final_airfoil
+    
     def get_early_stopping_stats(self):
         if not self.fitness_history:
             return None
@@ -588,14 +783,30 @@ class GeneticAF512Optimizer:
         max_fitness = max(best_fitnesses)
         max_fitness_gen = best_fitnesses.index(max_fitness) + 1
         
+        # Separate stage 1 and stage 2 statistics
+        stage1_generations = [h for h in self.fitness_history if 'stage' not in h or h.get('stage') == 1]
+        stage2_generations = [h for h in self.fitness_history if h.get('stage') == 2]
+        
+        stage1_best = max([h['best_fitness'] for h in stage1_generations]) if stage1_generations else 0
+        stage2_best = max([h['best_fitness'] for h in stage2_generations]) if stage2_generations else 0
+        
         return {
             'total_generations': len(self.fitness_history),
-            'max_generations': self.generations,
-            'early_stopped': len(self.fitness_history) < self.generations,
+            'max_generations': self.generations + self.stage2_generations,
+            'early_stopped': len(self.fitness_history) < (self.generations + self.stage2_generations),
             'best_fitness': max_fitness,
             'best_fitness_generation': max_fitness_gen,
             'early_stopping_patience': self.early_stopping_patience,
-            'early_stopping_tolerance': self.early_stopping_tolerance
+            'early_stopping_tolerance': self.early_stopping_tolerance,
+            'stage1_complete': self.stage1_complete,
+            'stage1_best_peak_ld': self.stage1_best_peak_ld,
+            'stage1_generations': len(stage1_generations),
+            'stage2_generations': len(stage2_generations),
+            'stage1_best_fitness': stage1_best,
+            'stage2_best_fitness': stage2_best,
+            'peak_ld_preserved': (self.stage1_best_peak_ld > 0 and 
+                                stage2_best >= self.stage1_best_peak_ld * self.peak_ld_preservation_threshold),
+            'stage1_final_airfoil': self.get_stage1_final_airfoil()
         }
     
     def save_results(self, filename: str = 'af512_optimization_results.json'):

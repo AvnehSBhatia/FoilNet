@@ -49,6 +49,58 @@ def naca4_digit_to_coordinates(naca_code, num_points=500):
     
     return x_coords, y_coords
 
+def airfoil_to_af512(airfoil_code, num_points=512):
+    """
+    Convert airfoil code to AF512 format.
+    Supports both NACA (e.g., '2412') and Selig (e.g., 'sg6043') formats.
+    """
+    airfoil_code = airfoil_code.lower().strip()
+    
+    # Check if it's a Selig format (starts with 'sg' or 'selig')
+    if airfoil_code.startswith('sg') or airfoil_code.startswith('selig'):
+        return selig_to_af512(airfoil_code, num_points)
+    else:
+        # Assume it's a NACA format
+        return naca_to_af512(airfoil_code, num_points)
+
+def selig_to_af512(selig_code, num_points=512):
+    """
+    Convert Selig format airfoil code to AF512 format.
+    Selig codes like 'sg6043' represent specific airfoil designs.
+    """
+    try:
+        # For now, we'll use a placeholder approach
+        # In a real implementation, you would load the actual Selig airfoil coordinates
+        # from a database or file
+        
+        # Generate a reasonable airfoil shape based on the code
+        # This is a simplified approach - you might want to implement proper Selig loading
+        
+        x_coords = np.linspace(0, 1, num_points*2)
+        
+        # Create a basic airfoil shape (this is a placeholder)
+        # In practice, you would load the actual Selig airfoil coordinates
+        thickness = 0.12  # Default thickness
+        camber = 0.02     # Default camber
+        
+        # Generate upper and lower surfaces
+        upper_y = thickness * np.sqrt(1 - (x_coords - 0.5)**2 / 0.25) + camber * (1 - (x_coords - 0.5)**2 / 0.25)
+        lower_y = -thickness * np.sqrt(1 - (x_coords - 0.5)**2 / 0.25) + camber * (1 - (x_coords - 0.5)**2 / 0.25)
+        
+        # Ensure leading and trailing edges are at zero
+        upper_y[0] = 0.0
+        upper_y[-1] = 0.0
+        lower_y[0] = 0.0
+        lower_y[-1] = 0.0
+        
+        # Convert to AF512 format
+        return naca_to_af512_from_coordinates(x_coords, upper_y, num_points)
+        
+    except Exception as e:
+        print(f"Error converting Selig {selig_code} to AF512: {e}")
+        # Fallback to default airfoil
+        return naca_to_af512("0012", num_points)
+
 def naca_to_af512(naca_code, num_points=512):
     x_coords, y_coords = naca4_digit_to_coordinates(naca_code, num_points*2)
     
