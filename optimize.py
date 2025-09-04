@@ -12,9 +12,10 @@ from PIL import Image
 import io
 from tqdm import tqdm
 
-WINGSPAN = 5.0
-CHORD = 0.5
-AIRSPEED = 30.0
+#EDIT THESE VALUES TO CHANGE THE FLIGHT CONDITIONS
+WINGSPAN = 80.0 
+CHORD = 8.0
+AIRSPEED = 200.0
 
 def optimize_naca_and_compare():
     print("Multi-NACA Airfoil Optimizer")
@@ -678,8 +679,9 @@ def create_comprehensive_plots(naca_results, best_naca_result, optimizer, target
         if 'optimizer' in result:
             stats = result['optimizer'].get_early_stopping_stats()
             if stats and stats['stage1_complete']:
-                stage1_peak_ld_values.append(stats['stage1_best_peak_ld'])
-                stage2_final_fitness_values.append(stats['stage2_best_fitness'])
+                if stats['stage1_best_peak_ld'] > 0:
+                    stage1_peak_ld_values.append(stats['stage1_best_peak_ld'])
+                    stage2_final_fitness_values.append(stats['stage2_best_fitness'])
                 
                 # Calculate area under curve improvement
                 original_area = result['original_airfoil']['aerodynamic_data'].get('area_under_curve', 0)
