@@ -383,25 +383,6 @@ class AF512toXYDataset(Dataset):
         
         return torch.FloatTensor(af512), torch.FloatTensor(xy_coords)
 
-class XYtoAF512Dataset(Dataset):
-    
-    def __init__(self, xy_coordinates, af512_data, add_noise=False, noise_level=0.005):
-        self.xy_coordinates = xy_coordinates
-        self.af512_data = af512_data
-        self.add_noise = add_noise
-        self.noise_level = noise_level
-    
-    def __len__(self):
-        return len(self.xy_coordinates)
-    
-    def __getitem__(self, idx):
-        xy_coords = self.xy_coordinates[idx]
-        af512 = self.af512_data[idx]
-        
-        if self.add_noise:
-            xy_coords = xy_coords + np.random.normal(0, self.noise_level, xy_coords.shape)
-        
-        return torch.FloatTensor(xy_coords), torch.FloatTensor(af512)
 
 class AF512toXYNet(nn.Module):
     
@@ -426,28 +407,6 @@ class AF512toXYNet(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-class XYtoAF512Net(nn.Module):
-    
-    def __init__(self, input_size=2048, output_size=1024, hidden_sizes=[512, 256, 128,256,512]):
-        super(XYtoAF512Net, self).__init__()
-        
-        layers = []
-        prev_size = input_size
-        
-        for hidden_size in hidden_sizes:
-            layers.extend([
-                nn.Linear(prev_size, hidden_size),
-                nn.SiLU(),
-                nn.Dropout(0.2),
-            ])
-            prev_size = hidden_size
-        
-        layers.append(nn.Linear(prev_size, output_size))
-        
-        self.network = nn.Sequential(*layers)
-    
-    def forward(self, x):
-        return self.network(x)
 
 def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0.001, device='mps'):
     model = model.to(device)
@@ -515,21 +474,6 @@ def predict_xy_coordinates(model, af512_data, device='mps'):
         
         return x_coords, y_coords
 
-def predict_af512_format(model, xy_coordinates, device='mps'):
-    model.eval()
-    with torch.no_grad():
-        if xy_coordinates.ndim == 1:
-            xy_flat = xy_coordinates
-        else:
-            xy_flat = xy_coordinates.flatten()
-        
-        input_tensor = torch.FloatTensor(xy_flat).unsqueeze(0).to(device)
-        output = model(input_tensor)
-        af512_flat = output.cpu().numpy().flatten()
-        
-        af512_data = af512_flat.reshape(512, 2)
-        
-        return af512_data
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
@@ -579,38 +523,6 @@ def main():
         
         torch.save(model.state_dict(), model_file)
     
-    xy_to_af512_train_dataset = XYtoAF512Dataset(train_xy, train_af512, add_noise=True, noise_level=0.005)
-    xy_to_af512_val_dataset = XYtoAF512Dataset(val_xy, val_af512, add_noise=False)
-    
-    xy_to_af512_train_loader = DataLoader(xy_to_af512_train_dataset, batch_size=32, shuffle=True)
-    xy_to_af512_val_loader = DataLoader(xy_to_af512_val_dataset, batch_size=32, shuffle=False)
-    
-    xy_to_af512_model_file = 'xy_to_af512_model.pth'
-    if os.path.exists(xy_to_af512_model_file):
-        xy_model_state = torch.load(xy_to_af512_model_file, map_location='cpu')
-        
-        xy_hidden_sizes = []
-        for i in range(0, len(xy_model_state.keys()) // 2 - 1):
-            weight_key = f'network.{i*3}.weight'
-            if weight_key in xy_model_state:
-                xy_hidden_sizes.append(xy_model_state[weight_key].shape[0])
-        
-        xy_to_af512_model = XYtoAF512Net(input_size=2048, output_size=1024, hidden_sizes=xy_hidden_sizes)
-        xy_to_af512_model.load_state_dict(torch.load(xy_to_af512_model_file, map_location=device))
-        xy_to_af512_model = xy_to_af512_model.to(device)
-        
-        xy_train_losses = []
-        xy_val_losses = []
-        
-    else:
-        xy_to_af512_model = XYtoAF512Net(input_size=2048, output_size=1024, hidden_sizes=[512, 256, 128,256,512])
-        
-        xy_train_losses, xy_val_losses = train_model(
-            xy_to_af512_model, xy_to_af512_train_loader, xy_to_af512_val_loader, 
-            num_epochs=100, learning_rate=0.001, device=device
-        )
-        
-        torch.save(xy_to_af512_model.state_dict(), xy_to_af512_model_file)
 
 NUM_SAMPLES = 10000
 FORCE_REGENERATE_DATA = False
