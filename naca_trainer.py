@@ -476,8 +476,13 @@ def predict_xy_coordinates(model, af512_data, device='mps'):
 
 
 def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps')
-    
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f"Using device: {device}")
     af512_data, xy_coordinates = generate_training_data(
         num_samples=NUM_SAMPLES, 
         num_points=512
