@@ -8,6 +8,15 @@
 
 The tool uses a neural network trained on NACA airfoil data to convert between different coordinate formats, then applies genetic algorithms to find better airfoil shapes. It evaluates performance using NeuralFoil for aerodynamic calculations.
 
+## Four-Stage Optimization
+
+1. Stage 1: Peak L/D optimization
+2. Stage 2: Peak CL at peak L/D optimization  
+3. Stage 3: Average CL over ±4° range optimization
+4. Stage 4: Average L/D over ±4° range optimization
+
+Each stage preserves previous achievements within 2% tolerance.
+
 ## Requirements
 
 - Python 3.7+
@@ -101,5 +110,6 @@ These values can be adjusted in the `optimize.py` file to suit different scenari
 - Enhanced flight conditions with new default values: 80.0 ft wingspan, 8.0 ft chord, and 200.0 mph airspeed.
 - Improved L/D calculation logic to ensure accuracy only when values are positive.
 - Updated optimization stages to better handle edge cases and improve performance.
+- Fixed Stage 2 fitness scaling by multiplying CL values by 100 for better optimization convergence.
 
 These updates aim to provide more accurate and efficient airfoil optimization results.

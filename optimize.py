@@ -13,9 +13,9 @@ import io
 from tqdm import tqdm
 
 #EDIT THESE VALUES TO CHANGE THE FLIGHT CONDITIONS
-WINGSPAN = 80.0 
-CHORD = 8.0
-AIRSPEED = 200.0
+WINGSPAN = 5
+CHORD = 0.8
+AIRSPEED = 35
 
 def optimize_naca_and_compare():
     print("Multi-NACA Airfoil Optimizer")
@@ -77,10 +77,12 @@ def optimize_naca_and_compare():
     except:
         print("Using ellipse-based starting shape")
     
-    print(f"\nStage 1: Optimizing {'NACA profile' if base_naca else 'ellipse-based starting shapes'}...")
-    print(f"Stage 1: {gens} generations with early stopping patience {early_stop_patience}")
-    print(f"Stage 2: Up to 1000 additional generations with 50 generation early stopping patience")
-    print(f"Stage 2: 0.5% noise for exploration, area improvement reward function")
+    print(f"\nFour-Stage Optimization: {'NACA profile' if base_naca else 'ellipse-based starting shapes'}")
+    print(f"Stage 1: Peak L/D optimization ({gens} generations with early stopping patience {early_stop_patience})")
+    print(f"Stage 2: Peak CL at peak L/D optimization (up to 1000 additional generations)")
+    print(f"Stage 3: Average CL over ±4° range optimization (up to 1000 additional generations)")
+    print(f"Stage 4: Average L/D over ±4° range optimization (up to 1000 additional generations)")
+    print(f"Constraints: Peak L/D and peak CL must not drop more than 2% from their respective stage bests")
     
     def create_ellipse_af512(thickness=0.12, thickness_pos=0.5, num_points=512):
         x_points = np.linspace(0, 1, num_points)
@@ -176,14 +178,19 @@ def optimize_naca_and_compare():
             'optimizer': temp_optimizer
         })
         
-        print(f"   {shape_name}: Original L/D = {original_fitness:.3f} → Optimized L/D = {optimized_airfoil['fitness']:.3f}")
-        print(f"   Improvement: {((optimized_airfoil['fitness'] - original_fitness) / original_fitness * 100):.1f}%")
+        print(f"   {shape_name}: Original Peak L/D = {original_fitness:.3f} → Final Stage 4 Fitness = {optimized_airfoil['fitness']:.3f}")
+        print(f"   Stage 1 Peak L/D: {optimized_airfoil['aerodynamic_data']['L/D']:.3f}")
+        print(f"   Stage 2 Peak CL: {optimized_airfoil['aerodynamic_data']['CL']:.3f}")
+        print(f"   Stage 4 Final Fitness: {optimized_airfoil['fitness']:.3f}")
     
     best_naca_result = max(naca_results, key=lambda x: x['fitness'])
     best_shape_name = best_naca_result['naca']
     best_optimized_airfoil = best_naca_result['optimized_airfoil']
     
-    print(f"\nBest optimized shape: {best_shape_name} with L/D = {best_naca_result['fitness']:.3f}")
+    print(f"\nBest optimized shape: {best_shape_name}")
+    print(f"  Stage 1 Peak L/D: {best_optimized_airfoil['aerodynamic_data']['L/D']:.3f}")
+    print(f"  Stage 2 Peak CL: {best_optimized_airfoil['aerodynamic_data']['CL']:.3f}")
+    print(f"  Stage 4 Final Fitness: {best_naca_result['fitness']:.3f}")
     
     print(f"\n" + "="*50)
     print(f"EARLY STOPPING STATISTICS")
@@ -198,15 +205,15 @@ def optimize_naca_and_compare():
                 print(f"{result['naca']}:")
                 print(f"  - Completed {stats['total_generations']}/{stats['max_generations']} generations")
                 print(f"  - Early stopped: {'Yes' if stats['early_stopped'] else 'No'}")
-                print(f"  - Best L/D: {stats['best_fitness']:.3f} at generation {stats['best_fitness_generation']}")
+                print(f"  - Best Stage 4 Final Fitness: {stats['best_fitness']:.3f} at generation {stats['best_fitness_generation']}")
                 
                 if stats['stage1_complete']:
                     print(f"  - Stage 1: {stats['stage1_generations']} gens, Peak L/D: {stats['stage1_best_peak_ld']:.3f}")
                     print(f"  - Stage 2: {stats['stage2_generations']} gens, Best fitness: {stats['stage2_best_fitness']:.3f}")
                     if stats['peak_ld_preserved']:
-                        print(f"  - ✓ Peak L/D preserved within 98% threshold")
+                        print(f"  - Peak L/D preserved within 98% threshold")
                     else:
-                        print(f"  - ⚠ Peak L/D not preserved within 98% threshold")
+                        print(f"  - Peak L/D not preserved within 98% threshold")
                 
                 if stats['early_stopped']:
                     early_stopped_count += 1
@@ -221,7 +228,7 @@ def optimize_naca_and_compare():
         print(f"\nNo early stopping occurred - all optimizations ran to completion")
     
     print(f"\n" + "="*50)
-    print(f"TWO-STAGE OPTIMIZATION RESULTS")
+    print(f"FOUR-STAGE OPTIMIZATION RESULTS")
     print(f"="*50)
     
     for i, result in enumerate(naca_results):
@@ -229,9 +236,13 @@ def optimize_naca_and_compare():
             stats = result['optimizer'].get_early_stopping_stats()
             if stats and stats['stage1_complete']:
                 print(f"{result['naca']}:")
-                print(f"  Stage 1 (Peak L/D): {stats['stage1_best_peak_ld']:.3f}")
-                print(f"  Stage 2 (Area under curve): {stats['stage2_best_fitness']:.3f}")
-                print(f"  Final L/D: {result['fitness']:.3f}")
+                print(f"  Stage 1 Peak L/D: {stats['stage1_best_peak_ld']:.3f}")
+                print(f"  Stage 2 Peak CL: {stats.get('stage2_best_peak_cl', 0):.3f}")
+                print(f"  Stage 3 Average CL: {stats.get('stage3_best_avg_cl', 0):.3f}")
+                print(f"  Stage 4 Final Fitness: {result['fitness']:.3f}")
+                print(f"  Final Peak L/D: {result['optimized_airfoil']['aerodynamic_data']['L/D']:.3f}")
+                print(f"  Final Peak CL: {result['optimized_airfoil']['aerodynamic_data']['CL']:.3f}")
+                print(f"  Peak Alpha: {result['optimized_airfoil']['aerodynamic_data']['peak_alpha']:.1f}°")
                 
                 # Calculate improvement in area under curve
                 original_area = result['original_airfoil']['aerodynamic_data'].get('area_under_curve', 0)
@@ -250,16 +261,19 @@ def optimize_naca_and_compare():
                             falloff_ratio = ld_at_10deg / peak_ld
                             print(f"  L/D at 10°: {ld_at_10deg:.2f} ({falloff_ratio*100:.1f}% of peak)")
                             if falloff_ratio >= 0.9:
-                                print(f"  ✓ L/D maintained within 10% of peak at 10°")
+                                print(f"  L/D maintained within 10% of peak at 10°")
                             else:
-                                print(f"  ⚠ L/D drops below 90% of peak at 10°")
+                                print(f"  L/D drops below 90% of peak at 10°")
                 
                 print()
     
     print(f"\n" + "="*50)
     print(f"OPTIMIZATION RESULTS")
     print(f"="*50)
-    print(f"Best optimized shape: {best_shape_name} with L/D = {best_naca_result['fitness']:.3f}")
+    print(f"Best optimized shape: {best_shape_name}")
+    print(f"  Stage 1 Peak L/D: {best_optimized_airfoil['aerodynamic_data']['L/D']:.3f}")
+    print(f"  Stage 2 Peak CL: {best_optimized_airfoil['aerodynamic_data']['CL']:.3f}")
+    print(f"  Stage 4 Final Fitness: {best_naca_result['fitness']:.3f}")
     
     results_data = {
         'target_lift': target_lift,
@@ -317,7 +331,7 @@ def create_comparison_plots(original, optimized, optimizer, naca_input):
     
     fig = plt.figure(figsize=(16, 10))
     
-    fig.suptitle(f'Flight Conditions: {optimizer.wingspan}ft wingspan, {optimizer.chord}ft chord, {optimizer.airspeed}mph airspeed (Re ≈ {optimizer.reynolds_number:.0f}) | Thickness: 8-16%', 
+    fig.suptitle(f'Flight Conditions: {optimizer.wingspan}ft wingspan, {optimizer.chord}ft chord, {optimizer.airspeed}mph airspeed (Re ≈ {optimizer.reynolds_number:.0f}) | Four-Stage: Peak L/D → Peak CL → Avg CL (±4°) → Avg L/D (±4°)', 
                  fontsize=14, fontweight='bold')
     
     plt.subplot(2, 3, 1)
@@ -336,8 +350,8 @@ def create_comparison_plots(original, optimized, optimizer, naca_input):
     colors = ['blue', 'red']
     
     bars = plt.bar(labels, ld_ratios, color=colors, alpha=0.7)
-    plt.ylabel('L/D Ratio')
-    plt.title('Performance Comparison')
+    plt.ylabel('Stage 4 Final Fitness')
+    plt.title('Stage 4 Performance Comparison')
     plt.grid(True, alpha=0.3, axis='y')
     
     for bar, value in zip(bars, ld_ratios):
@@ -385,12 +399,12 @@ def create_comparison_plots(original, optimized, optimizer, naca_input):
         best_fitnesses = [h['best_fitness'] for h in optimizer.fitness_history]
         avg_fitnesses = [h['avg_fitness'] for h in optimizer.fitness_history]
         
-        plt.plot(generations, best_fitnesses, 'b-', linewidth=2, label='Best L/D', marker='o')
-        plt.plot(generations, avg_fitnesses, 'r--', linewidth=2, label='Average L/D', alpha=0.7)
-        plt.axhline(y=original['fitness'], color='g', linestyle=':', linewidth=2, label='Original L/D')
+        plt.plot(generations, best_fitnesses, 'b-', linewidth=2, label='Best Fitness', marker='o')
+        plt.plot(generations, avg_fitnesses, 'r--', linewidth=2, label='Average Fitness', alpha=0.7)
+        plt.axhline(y=original['fitness'], color='g', linestyle=':', linewidth=2, label='Original Peak L/D')
         plt.xlabel('Generation')
-        plt.ylabel('L/D Ratio')
-        plt.title('Optimization Progress')
+        plt.ylabel('Fitness Value')
+        plt.title('Four-Stage Optimization Progress')
         plt.legend()
         plt.grid(True, alpha=0.3)
     
@@ -749,61 +763,62 @@ def create_comprehensive_plots(naca_results, best_naca_result, optimizer, target
     
     fig = plt.figure(figsize=(24, 16))
     
-    title = f'Multi-NACA Two-Stage Optimization Results | Flight: {optimizer.wingspan}ft wingspan, {optimizer.chord}ft chord, {optimizer.airspeed}mph'
+    title = f'Multi-NACA Four-Stage Optimization Results | Flight: {optimizer.wingspan}ft wingspan, {optimizer.chord}ft chord, {optimizer.airspeed}mph'
     if target_lift:
         title += f' | Target Lift: {target_lift:.3f} CL'
     if early_stop_patience and early_stop_tolerance:
         title += f' | Early Stop: {early_stop_patience} gens, tol={early_stop_tolerance}'
     fig.suptitle(title, fontsize=16, fontweight='bold')
     
-    # Plot 1: Two-stage optimization comparison
+    # Plot 1: Four-stage optimization comparison
     plt.subplot(3, 4, 1)
     x = np.arange(len(shape_names))
-    width = 0.25
+    width = 0.15
     
-    stage1_bars = plt.bar(x - width, stage1_peak_ld_values, width, label='Stage 1 (Peak L/D)', alpha=0.7, color='lightblue')
-    stage2_bars = plt.bar(x, stage2_final_fitness_values, width, label='Stage 2 (Area + Peak)', alpha=0.7, color='orange')
-    final_bars = plt.bar(x + width, optimized_peak_ld_values, width, label='Final L/D', alpha=0.7, color='red')
+    stage1_bars = plt.bar(x - 1.5*width, stage1_peak_ld_values, width, label='Stage 1 (Peak L/D)', alpha=0.7, color='lightblue')
+    stage2_bars = plt.bar(x - 0.5*width, [result['optimized_airfoil']['aerodynamic_data']['CL'] for result in naca_results], width, label='Stage 2 (Peak CL)', alpha=0.7, color='orange')
+    stage3_bars = plt.bar(x + 0.5*width, [stats.get('stage3_best_avg_cl', 0) for stats in [result['optimizer'].get_early_stopping_stats() if 'optimizer' in result else {} for result in naca_results]], width, label='Stage 3 (Avg CL)', alpha=0.7, color='green')
+    stage4_bars = plt.bar(x + 1.5*width, optimized_fitness_values, width, label='Stage 4 (Avg L/D)', alpha=0.7, color='purple')
     
     best_idx = shape_names.index(best_naca_result['naca'])
-    final_bars[best_idx].set_color('darkred')
+    stage4_bars[best_idx].set_color('darkred')
     
     plt.xlabel('Starting Shape')
     plt.ylabel('Fitness Value')
-    plt.title('Two-Stage Optimization Results')
+    plt.title('Four-Stage Optimization Results')
     plt.xticks(x, shape_names, rotation=45)
     plt.legend()
     plt.grid(True, alpha=0.3, axis='y')
     
-    # Plot 2: Area under curve improvements
+    # Plot 2: Stage 4 Final Fitness performance
     plt.subplot(3, 4, 2)
     colors_area = ['red' if result['naca'] == best_naca_result['naca'] else 'blue' for result in naca_results]
-    bars = plt.bar(range(len(shape_names)), area_improvements, color=colors_area, alpha=0.7)
+    bars = plt.bar(range(len(shape_names)), optimized_fitness_values, color=colors_area, alpha=0.7)
     plt.xlabel('Starting Shape')
-    plt.ylabel('Area Improvement (%)')
-    plt.title('Area Under L/D Curve Improvement')
+    plt.ylabel('Stage 4 Final Fitness')
+    plt.title('Stage 4 Final Fitness Performance')
     plt.xticks(range(len(shape_names)), shape_names, rotation=45)
     plt.grid(True, alpha=0.3, axis='y')
     
     # Add value labels on bars
-    for bar, value in zip(bars, area_improvements):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, 
-                f'{value:+.1f}%', ha='center', va='bottom', fontsize=8)
+    for bar, value in zip(bars, optimized_fitness_values):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
+                f'{value:.1f}', ha='center', va='bottom', fontsize=8)
     
     # Plot 3: Peak L/D comparison
     plt.subplot(3, 4, 3)
     x = np.arange(len(shape_names))
     width = 0.35
     
-    original_bars = plt.bar(x - width/2, original_peak_ld_values, width, label='Original', alpha=0.7, color='lightblue')
-    optimized_bars = plt.bar(x + width/2, optimized_peak_ld_values, width, label='Optimized', alpha=0.7, color='orange')
+    original_bars = plt.bar(x - width/2, original_peak_ld_values, width, label='Original Peak', alpha=0.7, color='lightblue')
+    optimized_bars = plt.bar(x + width/2, optimized_peak_ld_values, width, label='Final Peak', alpha=0.7, color='orange')
     
     best_idx = shape_names.index(best_naca_result['naca'])
     optimized_bars[best_idx].set_color('red')
     
     plt.xlabel('Starting Shape')
-    plt.ylabel('L/D Ratio')
-    plt.title('L/D Performance: Original vs Optimized')
+    plt.ylabel('Peak L/D')
+    plt.title('Peak L/D Performance: Original vs Final')
     plt.xticks(x, shape_names, rotation=45)
     plt.legend()
     plt.grid(True, alpha=0.3, axis='y')
@@ -1182,7 +1197,7 @@ def create_comprehensive_plots(naca_results, best_naca_result, optimizer, target
                 if peak_ld > 0:
                     falloff_ratio = ld_at_10deg / peak_ld
                     falloff_percent = (1 - falloff_ratio) * 100
-                    status = "✓ Good" if falloff_ratio >= 0.9 else "⚠ Poor"
+                    status = "Good" if falloff_ratio >= 0.9 else "Poor"
                     
                     table_data.append([
                         result['naca'],
@@ -1201,7 +1216,7 @@ def create_comprehensive_plots(naca_results, best_naca_result, optimizer, target
         
         # Color code the status column
         for i, row in enumerate(table_data):
-            if row[4] == "✓ Good":
+            if row[4] == "Good":
                 table[(i+1, 4)].set_facecolor('lightgreen')
             else:
                 table[(i+1, 4)].set_facecolor('lightcoral')
@@ -1221,7 +1236,11 @@ def create_comprehensive_plots(naca_results, best_naca_result, optimizer, target
 def main():
     print("Welcome to the NACA Airfoil Shape Optimizer!")
     print("Start with a NACA 4-digit profile (e.g., 2412) or ellipse-based shape!")
-    print("Watch it get optimized for maximum L/D ratio!")
+    print("Four-Stage Optimization:")
+    print("  Stage 1: Maximize peak L/D ratio")
+    print("  Stage 2: Maximize peak CL at peak L/D (with 2% max peak L/D drop)")
+    print("  Stage 3: Maximize average CL over ±4° range (with 2% max drops)")
+    print("  Stage 4: Maximize average L/D over ±4° range (with 2% max drops)")
     print()
     
     while True:
@@ -1235,7 +1254,7 @@ def main():
             print()
             
         except KeyboardInterrupt:
-            print(f"\n👋 Goodbye!")
+            print(f"\nGoodbye!")
             break
         except Exception as e:
             print(f"Error: {e}")
