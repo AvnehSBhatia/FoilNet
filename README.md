@@ -104,12 +104,3 @@ This is a research tool. Use at your own risk for any applications.
 - Default Airspeed: 35.0 mph
 
 These values can be adjusted in the `optimize.py` file to suit different scenarios.
-
-## Recent Updates
-
-- Enhanced flight conditions with new default values: 80.0 ft wingspan, 8.0 ft chord, and 200.0 mph airspeed.
-- Improved L/D calculation logic to ensure accuracy only when values are positive.
-- Updated optimization stages to better handle edge cases and improve performance.
-- Fixed Stage 2 fitness scaling by multiplying CL values by 100 for better optimization convergence.
-
-These updates aim to provide more accurate and efficient airfoil optimization results.
