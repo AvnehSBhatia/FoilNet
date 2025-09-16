@@ -99,9 +99,9 @@ This is a research tool. Use at your own risk for any applications.
 
 ## Flight Conditions
 
-- Default Wingspan: 80.0 ft
-- Default Chord: 8.0 ft
-- Default Airspeed: 200.0 mph
+- Default Wingspan: 6.0 ft
+- Default Chord: 0.8 ft
+- Default Airspeed: 35.0 mph
 
 These values can be adjusted in the `optimize.py` file to suit different scenarios.
 
