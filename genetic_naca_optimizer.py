@@ -8,6 +8,34 @@ from typing import List, Tuple, Optional
 import json
 import os
 
+# User-adjustable clipping settings
+CUSTOM_CLIP_X_RANGE: Optional[Tuple[float, float]] = (0.2, 0.8)
+CUSTOM_CLIP_LIMITS: Optional[Tuple[float, float]] = (0.001, 0.16)
+
+
+def apply_surface_clipping(
+    upper_dist: np.ndarray,
+    lower_dist: np.ndarray,
+    x_points: np.ndarray
+) -> None:
+    np.clip(upper_dist, 0.001, 0.16, out=upper_dist)
+    np.clip(lower_dist, -0.16, -0.001, out=lower_dist)
+
+    if CUSTOM_CLIP_X_RANGE and CUSTOM_CLIP_LIMITS:
+        x_min, x_max = CUSTOM_CLIP_X_RANGE
+        clip_min, clip_max = CUSTOM_CLIP_LIMITS
+        mask = (x_points >= x_min) & (x_points <= x_max)
+        if np.any(mask):
+            upper_dist[mask] = np.clip(upper_dist[mask], clip_min, clip_max)
+            lower_dist[mask] = np.clip(lower_dist[mask], -clip_max, -clip_min)
+
+
+def apply_clipping_to_af512(
+    af512_data: np.ndarray,
+    x_points: np.ndarray
+) -> None:
+    apply_surface_clipping(af512_data[:, 0], af512_data[:, 1], x_points)
+
 try:
     import neuralfoil
     print("NeuralFoil imported successfully")
@@ -119,8 +147,7 @@ class GeneticAF512Optimizer:
         upper_dist = thickness_dist
         lower_dist = -thickness_dist
         
-        upper_dist = np.clip(upper_dist, 0.001, 0.16)
-        lower_dist = np.clip(lower_dist, -0.16, -0.001)
+        apply_surface_clipping(upper_dist, lower_dist, x_points)
         
         upper_dist[0] = 0.0
         lower_dist[0] = 0.0
@@ -471,10 +498,13 @@ class GeneticAF512Optimizer:
         af512_2[:, 0] = gaussian_filter1d(af512_2[:, 0], sigma=2)
         af512_2[:, 1] = gaussian_filter1d(af512_2[:, 1], sigma=2)
         
+        x_points = np.linspace(0, 1, self.num_points)
         for af512_data in [af512_1, af512_2]:
-            af512_data[:, 0] = np.clip(af512_data[:, 0], 0.001, 0.16)
-            af512_data[:, 1] = np.clip(af512_data[:, 1], -0.16, -0.001)
+            apply_clipping_to_af512(af512_data, x_points)
             af512_data[0, :] = 0.0
+
+        child1['af512_data'] = af512_1
+        child2['af512_data'] = af512_2
         
         child1['fitness'] = None
         child2['fitness'] = None
@@ -499,14 +529,17 @@ class GeneticAF512Optimizer:
             af512_data[point_idx, 0] += noise_upper
             af512_data[point_idx, 1] += noise_lower
         
-        af512_data[:, 0] = np.clip(af512_data[:, 0], 0.001, 0.16)
-        af512_data[:, 1] = np.clip(af512_data[:, 1], -0.16, -0.001)
+        x_points = np.linspace(0, 1, self.num_points)
+        apply_clipping_to_af512(af512_data, x_points)
         
         af512_data[0, :] = 0.0
         
         from scipy.ndimage import gaussian_filter1d
         af512_data[:, 0] = gaussian_filter1d(af512_data[:, 0], sigma=3)
         af512_data[:, 1] = gaussian_filter1d(af512_data[:, 1], sigma=3)
+
+        apply_clipping_to_af512(af512_data, x_points)
+        af512_data[0, :] = 0.0
         
         leading_edge_thickness = af512_data[-1, 0] - af512_data[-1, 1]
         if leading_edge_thickness < 0.01:
@@ -525,8 +558,8 @@ class GeneticAF512Optimizer:
             individual['af512_data'][:, 0] = gaussian_filter1d(individual['af512_data'][:, 0], sigma=3)
             individual['af512_data'][:, 1] = gaussian_filter1d(individual['af512_data'][:, 1], sigma=3)
             
-            individual['af512_data'][:, 0] = np.clip(individual['af512_data'][:, 0], 0.001, 0.16)
-            individual['af512_data'][:, 1] = np.clip(individual['af512_data'][:, 1], -0.16, -0.001)
+            x_points = np.linspace(0, 1, self.num_points)
+            apply_clipping_to_af512(individual['af512_data'], x_points)
             individual['af512_data'][0, :] = 0.0
             
             individual['fitness'] = None
