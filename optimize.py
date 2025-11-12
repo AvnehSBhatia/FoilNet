@@ -13,9 +13,9 @@ import io
 from tqdm import tqdm
 
 #EDIT THESE VALUES TO CHANGE THE FLIGHT CONDITIONS
-WINGSPAN = 5
-CHORD = 0.8
-AIRSPEED = 35
+WINGSPAN = 3
+CHORD = 0.5
+AIRSPEED = 30
 
 def optimize_naca_and_compare():
     print("Multi-NACA Airfoil Optimizer")
