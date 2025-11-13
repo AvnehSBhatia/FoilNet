@@ -8,9 +8,12 @@ from typing import List, Tuple, Optional
 import json
 import os
 
-# User-adjustable clipping settings
-CUSTOM_CLIP_X_RANGE: Optional[Tuple[float, float]] = (0.2, 0.8)
-CUSTOM_CLIP_LIMITS: Optional[Tuple[float, float]] = (0.001, 0.16)
+CUSTOM_CLIP_RANGES: Optional[List[dict]] = [
+    {'x_range': (0.3, 0.7), 'top_clip': (0.001, 0.5), 'bottom_clip': (0.001, 0.5)}
+]
+# User-adjustable alpha (angle of attack) settings
+ALPHA_RANGE: Tuple[float, float] = (-10, 20)  # (min_alpha, max_alpha) in degrees
+ALPHA_INCREMENT: float = 1  # Increment in degrees (e.g., 0.1, 0.5, 1.0)
 
 
 def apply_surface_clipping(
@@ -18,10 +21,26 @@ def apply_surface_clipping(
     lower_dist: np.ndarray,
     x_points: np.ndarray
 ) -> None:
+    # Apply default clipping first
     np.clip(upper_dist, 0.001, 0.16, out=upper_dist)
     np.clip(lower_dist, -0.16, -0.001, out=lower_dist)
 
-    if CUSTOM_CLIP_X_RANGE and CUSTOM_CLIP_LIMITS:
+    # Apply custom clipping ranges if defined
+    if CUSTOM_CLIP_RANGES:
+        for clip_config in CUSTOM_CLIP_RANGES:
+            x_min, x_max = clip_config['x_range']
+            top_clip_min, top_clip_max = clip_config['top_clip']
+            bottom_clip_min, bottom_clip_max = clip_config['bottom_clip']
+            
+            mask = (x_points >= x_min) & (x_points <= x_max)
+            if np.any(mask):
+                # Apply top clip to upper surface
+                upper_dist[mask] = np.clip(upper_dist[mask], top_clip_min, top_clip_max)
+                # Apply bottom clip to lower surface (negated since lower_dist is negative)
+                lower_dist[mask] = np.clip(lower_dist[mask], -bottom_clip_max, -bottom_clip_min)
+    
+    # Legacy single-range support for backwards compatibility
+    elif CUSTOM_CLIP_X_RANGE and CUSTOM_CLIP_LIMITS:
         x_min, x_max = CUSTOM_CLIP_X_RANGE
         clip_min, clip_max = CUSTOM_CLIP_LIMITS
         mask = (x_points >= x_min) & (x_points <= x_max)
@@ -106,7 +125,11 @@ class GeneticAF512Optimizer:
         self.adaptive_mode = False
         self.adaptive_threshold = 25
         self.peak_ld_tolerance = 0.03
-        self.alpha_range = np.linspace(-5, 15, 21)
+        
+        # Create alpha_range array from user settings
+        alpha_min, alpha_max = ALPHA_RANGE
+        num_steps = int((alpha_max - alpha_min) / ALPHA_INCREMENT) + 1
+        self.alpha_range = np.linspace(alpha_min, alpha_max, num_steps)
         
         # Four-stage optimization parameters
         self.stage1_complete = False
@@ -249,11 +272,11 @@ class GeneticAF512Optimizer:
                 area_under_curve = np.trapz(ld_values, self.alpha_range)
                 
                 # Calculate average L/D over 0-12.5 degrees
-                # Alpha range is -5 to 15 degrees in 21 steps
-                # Index 5 = 0 degrees, Index 17 = 12.5 degrees (closest available)
-                start_idx = 5   # 0 degrees
-                end_idx = 17    # 12.5 degrees (closest available)
-                if end_idx < len(ld_values):
+                # Find indices closest to 0 and 12.5 degrees dynamically
+                start_idx = np.argmin(np.abs(self.alpha_range - 0.0))
+                end_alpha = min(12.5, self.alpha_range[-1])  # Don't exceed max alpha
+                end_idx = np.argmin(np.abs(self.alpha_range - end_alpha))
+                if end_idx < len(ld_values) and start_idx <= end_idx:
                     ld_0_to_12_5 = ld_values[start_idx:end_idx+1]
                     average_ld_0_to_12_5 = np.mean(ld_0_to_12_5)
                 else:
@@ -353,18 +376,18 @@ class GeneticAF512Optimizer:
                 # Calculate average CL over ±4° range around peak L/D
                 cl_values = aero_data.get('cl_values', [])
                 
-                if not cl_values or len(cl_values) < 21:
+                if not cl_values or len(cl_values) != len(self.alpha_range):
                     return 0.0
                 
                 # Find the peak L/D angle index
                 ld_values = aero_data.get('ld_values', [])
                 peak_ld_idx = ld_values.index(max(ld_values))
                 
-                # Calculate ±4° range around peak L/D
-                # Alpha range is -5 to 15 degrees in 21 steps (1 degree per step)
-                # ±4° means 4 indices before and after peak
-                start_idx = max(0, peak_ld_idx - 4)
-                end_idx = min(len(cl_values) - 1, peak_ld_idx + 4)
+                # Calculate ±4° range around peak L/D dynamically
+                # Convert 4 degrees to number of indices based on increment
+                indices_per_4deg = int(np.ceil(4.0 / ALPHA_INCREMENT))
+                start_idx = max(0, peak_ld_idx - indices_per_4deg)
+                end_idx = min(len(cl_values) - 1, peak_ld_idx + indices_per_4deg)
                 
                 # Calculate average CL over the ±4° range
                 cl_range = cl_values[start_idx:end_idx+1]
@@ -388,17 +411,17 @@ class GeneticAF512Optimizer:
                 # Calculate average L/D over ±4° range around peak L/D
                 ld_values = aero_data.get('ld_values', [])
                 
-                if not ld_values or len(ld_values) < 21:
+                if not ld_values or len(ld_values) != len(self.alpha_range):
                     return 0.0
                 
                 # Find the peak L/D angle index
                 peak_ld_idx = ld_values.index(max(ld_values))
                 
-                # Calculate ±4° range around peak L/D
-                # Alpha range is -5 to 15 degrees in 21 steps (1 degree per step)
-                # ±4° means 4 indices before and after peak
-                start_idx = max(0, peak_ld_idx - 4)
-                end_idx = min(len(ld_values) - 1, peak_ld_idx + 4)
+                # Calculate ±4° range around peak L/D dynamically
+                # Convert 4 degrees to number of indices based on increment
+                indices_per_4deg = int(np.ceil(4.0 / ALPHA_INCREMENT))
+                start_idx = max(0, peak_ld_idx - indices_per_4deg)
+                end_idx = min(len(ld_values) - 1, peak_ld_idx + indices_per_4deg)
                 
                 # Calculate average L/D over the ±4° range
                 ld_range = ld_values[start_idx:end_idx+1]
@@ -415,42 +438,48 @@ class GeneticAF512Optimizer:
         try:
             # Get L/D values at different angles of attack
             ld_values = aero_data.get('ld_values', [])
-            if not ld_values or len(ld_values) < 21:  # Need full alpha range
+            if not ld_values or len(ld_values) != len(self.alpha_range):
                 return 0.0
             
             # Find peak L/D and its index
             peak_ld = max(ld_values)
             peak_idx = ld_values.index(peak_ld)
             
-            # Check L/D at 10 degrees (index 15 in -5 to 15 range)
-            target_idx = 15
-            if target_idx < len(ld_values):
-                ld_at_10deg = ld_values[target_idx]
+            # Check L/D at 10 degrees (find closest index dynamically)
+            target_alpha = 10.0
+            if target_alpha <= self.alpha_range[-1]:
+                target_idx = np.argmin(np.abs(self.alpha_range - target_alpha))
+                if target_idx < len(ld_values):
+                    ld_at_10deg = ld_values[target_idx]
+                else:
+                    return 0.0
+            else:
+                return 0.0
+            
+            # Calculate how much L/D has fallen from peak
+            if peak_ld > 0:
+                falloff_ratio = ld_at_10deg / peak_ld
                 
-                # Calculate how much L/D has fallen from peak
-                if peak_ld > 0:
-                    falloff_ratio = ld_at_10deg / peak_ld
+                # If L/D at 10° is less than 90% of peak, apply penalty
+                if falloff_ratio < 0.9:  # 10% falloff threshold
+                    # Calculate penalty based on how much it falls below 90%
+                    penalty_strength = 50.0  # Strong penalty for aggressive falloff
+                    penalty = penalty_strength * (0.9 - falloff_ratio)
                     
-                    # If L/D at 10° is less than 90% of peak, apply penalty
-                    if falloff_ratio < 0.9:  # 10% falloff threshold
-                        # Calculate penalty based on how much it falls below 90%
-                        penalty_strength = 50.0  # Strong penalty for aggressive falloff
-                        penalty = penalty_strength * (0.9 - falloff_ratio)
-                        
-                        # Log the falloff penalty for debugging
-                        if penalty > 5.0:  # Only log significant penalties
-                            stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
-                            print(f"   [{stage_info}] L/D falloff penalty: {penalty:.1f} (peak: {peak_ld:.2f}, at 10°: {ld_at_10deg:.2f}, ratio: {falloff_ratio:.3f})")
-                        
-                        return penalty
+                    # Log the falloff penalty for debugging
+                    if penalty > 5.0:  # Only log significant penalties
+                        stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
+                        print(f"   [{stage_info}] L/D falloff penalty: {penalty:.1f} (peak: {peak_ld:.2f}, at 10°: {ld_at_10deg:.2f}, ratio: {falloff_ratio:.3f})")
                     
-                    # Bonus for maintaining L/D above 90% at 10°
-                    if falloff_ratio >= 0.9:
-                        bonus = 10.0 * (falloff_ratio - 0.9)  # Small bonus for better performance
-                        if bonus > 0.5:  # Only log significant bonuses
-                            stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
-                            print(f"   [{stage_info}] L/D falloff bonus: {bonus:.1f} (ratio: {falloff_ratio:.3f})")
-                        return -bonus  # Negative penalty = bonus
+                    return penalty
+                
+                # Bonus for maintaining L/D above 90% at 10°
+                if falloff_ratio >= 0.9:
+                    bonus = 10.0 * (falloff_ratio - 0.9)  # Small bonus for better performance
+                    if bonus > 0.5:  # Only log significant bonuses
+                        stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
+                        print(f"   [{stage_info}] L/D falloff bonus: {bonus:.1f} (ratio: {falloff_ratio:.3f})")
+                    return -bonus  # Negative penalty = bonus
             
             return 0.0
             
