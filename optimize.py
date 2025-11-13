@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 #EDIT THESE VALUES TO CHANGE THE FLIGHT CONDITIONS
 WINGSPAN = 3
-CHORD = 0.5
+CHORD = 1
 AIRSPEED = 30
 
 def optimize_naca_and_compare():
@@ -1101,15 +1101,26 @@ def create_comprehensive_plots(naca_results, best_naca_result, optimizer, target
     
     # Plot 1: L/D vs Alpha for all optimized airfoils
     plt.subplot(2, 2, 1)
-    alpha_range = np.linspace(-5, 15, 21)
+    base_alpha_range = np.linspace(-5, 15, 21)
     
     for i, result in enumerate(naca_results):
         if 'ld_values' in result['optimized_airfoil']['aerodynamic_data']:
-            ld_values = result['optimized_airfoil']['aerodynamic_data']['ld_values']
-            if len(ld_values) >= 21:
+            ld_values = np.asarray(result['optimized_airfoil']['aerodynamic_data']['ld_values'])
+            optimizer_alpha = result.get('optimizer').alpha_range if result.get('optimizer') else base_alpha_range
+            alpha_values = np.asarray(optimizer_alpha)
+            
+            if len(alpha_values) != len(ld_values):
+                min_len = min(len(alpha_values), len(ld_values))
+                alpha_plot = alpha_values[:min_len]
+                ld_plot = ld_values[:min_len]
+            else:
+                alpha_plot = alpha_values
+                ld_plot = ld_values
+            
+            if len(ld_plot) > 0:
                 color = 'red' if result['naca'] == best_naca_result['naca'] else 'blue'
-                plt.plot(alpha_range, ld_values, color=color, alpha=0.7, linewidth=2, 
-                        label=f"{result['naca']} (Peak: {max(ld_values):.1f})")
+                plt.plot(alpha_plot, ld_plot, color=color, alpha=0.7, linewidth=2, 
+                        label=f"{result['naca']} (Peak: {max(ld_plot):.1f})")
     
     plt.axvline(x=10, color='red', linestyle='--', alpha=0.7, label='10° Check Point')
     plt.xlabel('Angle of Attack (degrees)')

@@ -9,11 +9,14 @@ import json
 import os
 
 CUSTOM_CLIP_RANGES: Optional[List[dict]] = [
-    {'x_range': (0.3, 0.7), 'top_clip': (0.001, 0.5), 'bottom_clip': (0.001, 0.5)}
+    {'x_range': (0.2, 0.8), 'top_clip': (0.08, 0.1), 'bottom_clip': (0.05, 0.1)},
 ]
 # User-adjustable alpha (angle of attack) settings
 ALPHA_RANGE: Tuple[float, float] = (-10, 20)  # (min_alpha, max_alpha) in degrees
 ALPHA_INCREMENT: float = 1  # Increment in degrees (e.g., 0.1, 0.5, 1.0)
+
+AIRFOIL_MODES: Tuple[str, ...] = ("normal", "symmetric", "flat")
+DEFAULT_AIRFOIL_MODE: str = "normal"
 
 
 def apply_surface_clipping(
@@ -22,27 +25,30 @@ def apply_surface_clipping(
     x_points: np.ndarray
 ) -> None:
     # Apply default clipping first
-    np.clip(upper_dist, 0.001, 0.16, out=upper_dist)
-    np.clip(lower_dist, -0.16, -0.001, out=lower_dist)
+    default_top_min, default_top_max = 0.001, 0.16
+    default_bottom_min, default_bottom_max = -0.16, -0.001
+    np.clip(upper_dist, default_top_min, default_top_max, out=upper_dist)
+    np.clip(lower_dist, default_bottom_min, default_bottom_max, out=lower_dist)
 
-    # Apply custom clipping ranges if defined
+    # Apply custom clipping ranges on top (overrides defaults in those regions)
     if CUSTOM_CLIP_RANGES:
         for clip_config in CUSTOM_CLIP_RANGES:
             x_min, x_max = clip_config['x_range']
             top_clip_min, top_clip_max = clip_config['top_clip']
             bottom_clip_min, bottom_clip_max = clip_config['bottom_clip']
-            
+
             mask = (x_points >= x_min) & (x_points <= x_max)
             if np.any(mask):
-                # Apply top clip to upper surface
                 upper_dist[mask] = np.clip(upper_dist[mask], top_clip_min, top_clip_max)
-                # Apply bottom clip to lower surface (negated since lower_dist is negative)
                 lower_dist[mask] = np.clip(lower_dist[mask], -bottom_clip_max, -bottom_clip_min)
-    
+        return
+
     # Legacy single-range support for backwards compatibility
-    elif CUSTOM_CLIP_X_RANGE and CUSTOM_CLIP_LIMITS:
-        x_min, x_max = CUSTOM_CLIP_X_RANGE
-        clip_min, clip_max = CUSTOM_CLIP_LIMITS
+    legacy_x_range = globals().get('CUSTOM_CLIP_X_RANGE')
+    legacy_limits = globals().get('CUSTOM_CLIP_LIMITS')
+    if legacy_x_range and legacy_limits:
+        x_min, x_max = legacy_x_range
+        clip_min, clip_max = legacy_limits
         mask = (x_points >= x_min) & (x_points <= x_max)
         if np.any(mask):
             upper_dist[mask] = np.clip(upper_dist[mask], clip_min, clip_max)
@@ -80,7 +86,8 @@ class GeneticAF512Optimizer:
                  target_lift: float = None,
                  image_callback: callable = None,
                  early_stopping_patience: int = 10,
-                 early_stopping_tolerance: float = 0.001):
+                 early_stopping_tolerance: float = 0.001,
+                 airfoil_mode: str = DEFAULT_AIRFOIL_MODE):
         
         self.population_size = population_size
         self.mutation_rate = mutation_rate
@@ -92,6 +99,9 @@ class GeneticAF512Optimizer:
         self.alpha_range = alpha_range
         self.num_points = num_points
         self.target_lift = target_lift
+        if airfoil_mode not in AIRFOIL_MODES:
+            raise ValueError(f"Invalid airfoil_mode '{airfoil_mode}'. Choose from {AIRFOIL_MODES}.")
+        self.airfoil_mode = airfoil_mode
         
         airspeed_fts = airspeed * 1.467
         density = 0.002377
@@ -175,32 +185,37 @@ class GeneticAF512Optimizer:
         upper_dist[0] = 0.0
         lower_dist[0] = 0.0
         
-        leading_edge_thickness = upper_dist[-1] - lower_dist[-1]
-        if leading_edge_thickness < 0.01:
-            center = (upper_dist[-1] + lower_dist[-1]) / 2
-            upper_dist[-1] = center + 0.005
-            lower_dist[-1] = center - 0.005
+        if self.airfoil_mode == "normal":
+            leading_edge_thickness = upper_dist[-1] - lower_dist[-1]
+            if leading_edge_thickness < 0.01:
+                center = (upper_dist[-1] + lower_dist[-1]) / 2
+                upper_dist[-1] = center + 0.005
+                lower_dist[-1] = center - 0.005
         
         af512_data = np.column_stack([upper_dist, lower_dist])
         
-        return {
+        individual = {
             'af512_data': af512_data,
             'fitness': None,
             'xy_coordinates': None,
             'aerodynamic_data': None
         }
+        self._enforce_mode_on_individual(individual)
+        return individual
     
     def create_individual_from_airfoil(self, airfoil_code: str) -> dict:
         """Create individual from airfoil code (supports both NACA and Selig formats)"""
         try:
             from naca_trainer import airfoil_to_af512
             af512_data = airfoil_to_af512(airfoil_code, self.num_points)
-            return {
+            individual = {
                 'af512_data': af512_data,
                 'fitness': None,
                 'xy_coordinates': None,
                 'aerodynamic_data': None
             }
+            self._enforce_mode_on_individual(individual)
+            return individual
         except Exception as e:
             print(f"Error creating from airfoil {airfoil_code}: {e}")
             return self.create_individual()
@@ -324,6 +339,7 @@ class GeneticAF512Optimizer:
     
     def evaluate_fitness(self, individual: dict) -> float:
         try:
+            self._enforce_mode_on_individual(individual)
             x_coords, y_coords = self.af512_to_xy_coordinates(individual['af512_data'])
             individual['xy_coordinates'] = (x_coords, y_coords)
             
@@ -486,10 +502,31 @@ class GeneticAF512Optimizer:
         except Exception as e:
             print(f"Error calculating falloff penalty: {e}")
             return 0.0
+
+    def _enforce_airfoil_mode(self, af512_data: np.ndarray) -> None:
+        """Apply mode-specific constraints to AF512 representation."""
+        if self.airfoil_mode == "symmetric":
+            upper = np.clip(af512_data[:, 0], 0.0, None)
+            af512_data[:, 0] = upper
+            af512_data[:, 1] = -upper
+        elif self.airfoil_mode == "flat":
+            af512_data[:, 0] = np.clip(af512_data[:, 0], 0.0, None)
+            af512_data[:, 1] = 0.0
+        else:
+            af512_data[:, 0] = np.clip(af512_data[:, 0], 0.0, None)
+            af512_data[:, 1] = np.clip(af512_data[:, 1], None, 0.0)
+    
+    def _enforce_mode_on_individual(self, individual: dict) -> None:
+        af512_data = individual.get('af512_data')
+        if af512_data is None:
+            return
+        self._enforce_airfoil_mode(af512_data)
+        af512_data[0, :] = 0.0
     
     def evaluate_population(self):
         print("Evaluating population fitness...")
         for i, individual in enumerate(self.population):
+            self._enforce_mode_on_individual(individual)
             if i % 10 == 0:
                 print(f"   Evaluating individual {i+1}/{len(self.population)}")
             self.evaluate_fitness(individual)
@@ -530,10 +567,13 @@ class GeneticAF512Optimizer:
         x_points = np.linspace(0, 1, self.num_points)
         for af512_data in [af512_1, af512_2]:
             apply_clipping_to_af512(af512_data, x_points)
+            self._enforce_airfoil_mode(af512_data)
             af512_data[0, :] = 0.0
 
         child1['af512_data'] = af512_1
         child2['af512_data'] = af512_2
+        self._enforce_mode_on_individual(child1)
+        self._enforce_mode_on_individual(child2)
         
         child1['fitness'] = None
         child2['fitness'] = None
@@ -560,21 +600,23 @@ class GeneticAF512Optimizer:
         
         x_points = np.linspace(0, 1, self.num_points)
         apply_clipping_to_af512(af512_data, x_points)
-        
-        af512_data[0, :] = 0.0
+        self._enforce_mode_on_individual(individual)
         
         from scipy.ndimage import gaussian_filter1d
         af512_data[:, 0] = gaussian_filter1d(af512_data[:, 0], sigma=3)
         af512_data[:, 1] = gaussian_filter1d(af512_data[:, 1], sigma=3)
 
         apply_clipping_to_af512(af512_data, x_points)
-        af512_data[0, :] = 0.0
+        self._enforce_mode_on_individual(individual)
         
-        leading_edge_thickness = af512_data[-1, 0] - af512_data[-1, 1]
-        if leading_edge_thickness < 0.01:
-            center = (af512_data[-1, 0] + af512_data[-1, 1]) / 2
-            af512_data[-1, 0] = center + 0.005
-            af512_data[-1, 1] = center - 0.005
+        if self.airfoil_mode == "normal":
+            leading_edge_thickness = af512_data[-1, 0] - af512_data[-1, 1]
+            if leading_edge_thickness < 0.01:
+                center = (af512_data[-1, 0] + af512_data[-1, 1]) / 2
+                af512_data[-1, 0] = center + 0.005
+                af512_data[-1, 1] = center - 0.005
+        
+        self._enforce_mode_on_individual(individual)
         
         individual['fitness'] = None
     
@@ -589,7 +631,7 @@ class GeneticAF512Optimizer:
             
             x_points = np.linspace(0, 1, self.num_points)
             apply_clipping_to_af512(individual['af512_data'], x_points)
-            individual['af512_data'][0, :] = 0.0
+            self._enforce_mode_on_individual(individual)
             
             individual['fitness'] = None
             individual['xy_coordinates'] = None
@@ -639,7 +681,9 @@ class GeneticAF512Optimizer:
         new_population = []
         
         best_individual = max(self.population, key=lambda x: x['fitness'])
-        new_population.append(copy.deepcopy(best_individual))
+        elite = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(elite)
+        new_population.append(elite)
         
         while len(new_population) < self.population_size:
             parent1, parent2 = self.select_parents()
@@ -659,7 +703,9 @@ class GeneticAF512Optimizer:
         new_population = []
         
         best_individual = max(self.population, key=lambda x: x['fitness'])
-        new_population.append(copy.deepcopy(best_individual))
+        elite = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(elite)
+        new_population.append(elite)
         
         while len(new_population) < self.population_size:
             parent1, parent2 = self.select_parents()
@@ -751,6 +797,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 1 final airfoil for comparison
         self.stage1_final_airfoil = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(self.stage1_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 1 COMPLETE: Peak L/D = {self.stage1_best_peak_ld:.3f}")
@@ -821,6 +868,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 2 final airfoil for comparison
         self.stage2_final_airfoil = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(self.stage2_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 2 COMPLETE: Peak CL = {self.stage2_best_peak_cl:.3f}")
@@ -892,6 +940,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 3 final airfoil for comparison
         self.stage3_final_airfoil = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(self.stage3_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 3 COMPLETE: Average CL = {self.stage3_best_avg_cl:.3f}")
@@ -960,6 +1009,7 @@ class GeneticAF512Optimizer:
         # Final evaluation
         self.evaluate_population()
         final_best = max(self.population, key=lambda x: x['fitness'])
+        self._enforce_mode_on_individual(final_best)
         
         print(f"\nOptimization Complete!")
         print(f"Stage 1: Peak L/D = {self.stage1_best_peak_ld:.3f}")
