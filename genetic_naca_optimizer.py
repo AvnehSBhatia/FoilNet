@@ -8,9 +8,15 @@ from typing import List, Tuple, Optional
 import json
 import os
 
-# User-adjustable clipping settings
-CUSTOM_CLIP_X_RANGE: Optional[Tuple[float, float]] = (0.2, 0.8)
-CUSTOM_CLIP_LIMITS: Optional[Tuple[float, float]] = (0.001, 0.16)
+CUSTOM_CLIP_RANGES: Optional[List[dict]] = [
+    {'x_range': (0.2, 0.8), 'top_clip': (0.08, 0.1), 'bottom_clip': (0.05, 0.1)},
+]
+# User-adjustable alpha (angle of attack) settings
+ALPHA_RANGE: Tuple[float, float] = (-10, 20)  # (min_alpha, max_alpha) in degrees
+ALPHA_INCREMENT: float = 1  # Increment in degrees (e.g., 0.1, 0.5, 1.0)
+
+AIRFOIL_MODES: Tuple[str, ...] = ("normal", "symmetric", "flat")
+DEFAULT_AIRFOIL_MODE: str = "normal"
 
 
 def apply_surface_clipping(
@@ -18,12 +24,31 @@ def apply_surface_clipping(
     lower_dist: np.ndarray,
     x_points: np.ndarray
 ) -> None:
-    np.clip(upper_dist, 0.001, 0.16, out=upper_dist)
-    np.clip(lower_dist, -0.16, -0.001, out=lower_dist)
+    # Apply default clipping first
+    default_top_min, default_top_max = 0.001, 0.16
+    default_bottom_min, default_bottom_max = -0.16, -0.001
+    np.clip(upper_dist, default_top_min, default_top_max, out=upper_dist)
+    np.clip(lower_dist, default_bottom_min, default_bottom_max, out=lower_dist)
 
-    if CUSTOM_CLIP_X_RANGE and CUSTOM_CLIP_LIMITS:
-        x_min, x_max = CUSTOM_CLIP_X_RANGE
-        clip_min, clip_max = CUSTOM_CLIP_LIMITS
+    # Apply custom clipping ranges on top (overrides defaults in those regions)
+    if CUSTOM_CLIP_RANGES:
+        for clip_config in CUSTOM_CLIP_RANGES:
+            x_min, x_max = clip_config['x_range']
+            top_clip_min, top_clip_max = clip_config['top_clip']
+            bottom_clip_min, bottom_clip_max = clip_config['bottom_clip']
+
+            mask = (x_points >= x_min) & (x_points <= x_max)
+            if np.any(mask):
+                upper_dist[mask] = np.clip(upper_dist[mask], top_clip_min, top_clip_max)
+                lower_dist[mask] = np.clip(lower_dist[mask], -bottom_clip_max, -bottom_clip_min)
+        return
+
+    # Legacy single-range support for backwards compatibility
+    legacy_x_range = globals().get('CUSTOM_CLIP_X_RANGE')
+    legacy_limits = globals().get('CUSTOM_CLIP_LIMITS')
+    if legacy_x_range and legacy_limits:
+        x_min, x_max = legacy_x_range
+        clip_min, clip_max = legacy_limits
         mask = (x_points >= x_min) & (x_points <= x_max)
         if np.any(mask):
             upper_dist[mask] = np.clip(upper_dist[mask], clip_min, clip_max)
@@ -61,7 +86,8 @@ class GeneticAF512Optimizer:
                  target_lift: float = None,
                  image_callback: callable = None,
                  early_stopping_patience: int = 10,
-                 early_stopping_tolerance: float = 0.001):
+                 early_stopping_tolerance: float = 0.001,
+                 airfoil_mode: str = DEFAULT_AIRFOIL_MODE):
         
         self.population_size = population_size
         self.mutation_rate = mutation_rate
@@ -73,6 +99,9 @@ class GeneticAF512Optimizer:
         self.alpha_range = alpha_range
         self.num_points = num_points
         self.target_lift = target_lift
+        if airfoil_mode not in AIRFOIL_MODES:
+            raise ValueError(f"Invalid airfoil_mode '{airfoil_mode}'. Choose from {AIRFOIL_MODES}.")
+        self.airfoil_mode = airfoil_mode
         
         airspeed_fts = airspeed * 1.467
         density = 0.002377
@@ -106,7 +135,11 @@ class GeneticAF512Optimizer:
         self.adaptive_mode = False
         self.adaptive_threshold = 25
         self.peak_ld_tolerance = 0.03
-        self.alpha_range = np.linspace(-5, 15, 21)
+        
+        # Create alpha_range array from user settings
+        alpha_min, alpha_max = ALPHA_RANGE
+        num_steps = int((alpha_max - alpha_min) / ALPHA_INCREMENT) + 1
+        self.alpha_range = np.linspace(alpha_min, alpha_max, num_steps)
         
         # Four-stage optimization parameters
         self.stage1_complete = False
@@ -152,32 +185,37 @@ class GeneticAF512Optimizer:
         upper_dist[0] = 0.0
         lower_dist[0] = 0.0
         
-        leading_edge_thickness = upper_dist[-1] - lower_dist[-1]
-        if leading_edge_thickness < 0.01:
-            center = (upper_dist[-1] + lower_dist[-1]) / 2
-            upper_dist[-1] = center + 0.005
-            lower_dist[-1] = center - 0.005
+        if self.airfoil_mode == "normal":
+            leading_edge_thickness = upper_dist[-1] - lower_dist[-1]
+            if leading_edge_thickness < 0.01:
+                center = (upper_dist[-1] + lower_dist[-1]) / 2
+                upper_dist[-1] = center + 0.005
+                lower_dist[-1] = center - 0.005
         
         af512_data = np.column_stack([upper_dist, lower_dist])
         
-        return {
+        individual = {
             'af512_data': af512_data,
             'fitness': None,
             'xy_coordinates': None,
             'aerodynamic_data': None
         }
+        self._enforce_mode_on_individual(individual)
+        return individual
     
     def create_individual_from_airfoil(self, airfoil_code: str) -> dict:
         """Create individual from airfoil code (supports both NACA and Selig formats)"""
         try:
             from naca_trainer import airfoil_to_af512
             af512_data = airfoil_to_af512(airfoil_code, self.num_points)
-            return {
+            individual = {
                 'af512_data': af512_data,
                 'fitness': None,
                 'xy_coordinates': None,
                 'aerodynamic_data': None
             }
+            self._enforce_mode_on_individual(individual)
+            return individual
         except Exception as e:
             print(f"Error creating from airfoil {airfoil_code}: {e}")
             return self.create_individual()
@@ -249,11 +287,11 @@ class GeneticAF512Optimizer:
                 area_under_curve = np.trapz(ld_values, self.alpha_range)
                 
                 # Calculate average L/D over 0-12.5 degrees
-                # Alpha range is -5 to 15 degrees in 21 steps
-                # Index 5 = 0 degrees, Index 17 = 12.5 degrees (closest available)
-                start_idx = 5   # 0 degrees
-                end_idx = 17    # 12.5 degrees (closest available)
-                if end_idx < len(ld_values):
+                # Find indices closest to 0 and 12.5 degrees dynamically
+                start_idx = np.argmin(np.abs(self.alpha_range - 0.0))
+                end_alpha = min(12.5, self.alpha_range[-1])  # Don't exceed max alpha
+                end_idx = np.argmin(np.abs(self.alpha_range - end_alpha))
+                if end_idx < len(ld_values) and start_idx <= end_idx:
                     ld_0_to_12_5 = ld_values[start_idx:end_idx+1]
                     average_ld_0_to_12_5 = np.mean(ld_0_to_12_5)
                 else:
@@ -301,6 +339,7 @@ class GeneticAF512Optimizer:
     
     def evaluate_fitness(self, individual: dict) -> float:
         try:
+            self._enforce_mode_on_individual(individual)
             x_coords, y_coords = self.af512_to_xy_coordinates(individual['af512_data'])
             individual['xy_coordinates'] = (x_coords, y_coords)
             
@@ -353,18 +392,18 @@ class GeneticAF512Optimizer:
                 # Calculate average CL over ±4° range around peak L/D
                 cl_values = aero_data.get('cl_values', [])
                 
-                if not cl_values or len(cl_values) < 21:
+                if not cl_values or len(cl_values) != len(self.alpha_range):
                     return 0.0
                 
                 # Find the peak L/D angle index
                 ld_values = aero_data.get('ld_values', [])
                 peak_ld_idx = ld_values.index(max(ld_values))
                 
-                # Calculate ±4° range around peak L/D
-                # Alpha range is -5 to 15 degrees in 21 steps (1 degree per step)
-                # ±4° means 4 indices before and after peak
-                start_idx = max(0, peak_ld_idx - 4)
-                end_idx = min(len(cl_values) - 1, peak_ld_idx + 4)
+                # Calculate ±4° range around peak L/D dynamically
+                # Convert 4 degrees to number of indices based on increment
+                indices_per_4deg = int(np.ceil(4.0 / ALPHA_INCREMENT))
+                start_idx = max(0, peak_ld_idx - indices_per_4deg)
+                end_idx = min(len(cl_values) - 1, peak_ld_idx + indices_per_4deg)
                 
                 # Calculate average CL over the ±4° range
                 cl_range = cl_values[start_idx:end_idx+1]
@@ -388,17 +427,17 @@ class GeneticAF512Optimizer:
                 # Calculate average L/D over ±4° range around peak L/D
                 ld_values = aero_data.get('ld_values', [])
                 
-                if not ld_values or len(ld_values) < 21:
+                if not ld_values or len(ld_values) != len(self.alpha_range):
                     return 0.0
                 
                 # Find the peak L/D angle index
                 peak_ld_idx = ld_values.index(max(ld_values))
                 
-                # Calculate ±4° range around peak L/D
-                # Alpha range is -5 to 15 degrees in 21 steps (1 degree per step)
-                # ±4° means 4 indices before and after peak
-                start_idx = max(0, peak_ld_idx - 4)
-                end_idx = min(len(ld_values) - 1, peak_ld_idx + 4)
+                # Calculate ±4° range around peak L/D dynamically
+                # Convert 4 degrees to number of indices based on increment
+                indices_per_4deg = int(np.ceil(4.0 / ALPHA_INCREMENT))
+                start_idx = max(0, peak_ld_idx - indices_per_4deg)
+                end_idx = min(len(ld_values) - 1, peak_ld_idx + indices_per_4deg)
                 
                 # Calculate average L/D over the ±4° range
                 ld_range = ld_values[start_idx:end_idx+1]
@@ -415,52 +454,79 @@ class GeneticAF512Optimizer:
         try:
             # Get L/D values at different angles of attack
             ld_values = aero_data.get('ld_values', [])
-            if not ld_values or len(ld_values) < 21:  # Need full alpha range
+            if not ld_values or len(ld_values) != len(self.alpha_range):
                 return 0.0
             
             # Find peak L/D and its index
             peak_ld = max(ld_values)
             peak_idx = ld_values.index(peak_ld)
             
-            # Check L/D at 10 degrees (index 15 in -5 to 15 range)
-            target_idx = 15
-            if target_idx < len(ld_values):
-                ld_at_10deg = ld_values[target_idx]
+            # Check L/D at 10 degrees (find closest index dynamically)
+            target_alpha = 10.0
+            if target_alpha <= self.alpha_range[-1]:
+                target_idx = np.argmin(np.abs(self.alpha_range - target_alpha))
+                if target_idx < len(ld_values):
+                    ld_at_10deg = ld_values[target_idx]
+                else:
+                    return 0.0
+            else:
+                return 0.0
+            
+            # Calculate how much L/D has fallen from peak
+            if peak_ld > 0:
+                falloff_ratio = ld_at_10deg / peak_ld
                 
-                # Calculate how much L/D has fallen from peak
-                if peak_ld > 0:
-                    falloff_ratio = ld_at_10deg / peak_ld
+                # If L/D at 10° is less than 90% of peak, apply penalty
+                if falloff_ratio < 0.9:  # 10% falloff threshold
+                    # Calculate penalty based on how much it falls below 90%
+                    penalty_strength = 50.0  # Strong penalty for aggressive falloff
+                    penalty = penalty_strength * (0.9 - falloff_ratio)
                     
-                    # If L/D at 10° is less than 90% of peak, apply penalty
-                    if falloff_ratio < 0.9:  # 10% falloff threshold
-                        # Calculate penalty based on how much it falls below 90%
-                        penalty_strength = 50.0  # Strong penalty for aggressive falloff
-                        penalty = penalty_strength * (0.9 - falloff_ratio)
-                        
-                        # Log the falloff penalty for debugging
-                        if penalty > 5.0:  # Only log significant penalties
-                            stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
-                            print(f"   [{stage_info}] L/D falloff penalty: {penalty:.1f} (peak: {peak_ld:.2f}, at 10°: {ld_at_10deg:.2f}, ratio: {falloff_ratio:.3f})")
-                        
-                        return penalty
+                    # Log the falloff penalty for debugging
+                    if penalty > 5.0:  # Only log significant penalties
+                        stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
+                        print(f"   [{stage_info}] L/D falloff penalty: {penalty:.1f} (peak: {peak_ld:.2f}, at 10°: {ld_at_10deg:.2f}, ratio: {falloff_ratio:.3f})")
                     
-                    # Bonus for maintaining L/D above 90% at 10°
-                    if falloff_ratio >= 0.9:
-                        bonus = 10.0 * (falloff_ratio - 0.9)  # Small bonus for better performance
-                        if bonus > 0.5:  # Only log significant bonuses
-                            stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
-                            print(f"   [{stage_info}] L/D falloff bonus: {bonus:.1f} (ratio: {falloff_ratio:.3f})")
-                        return -bonus  # Negative penalty = bonus
+                    return penalty
+                
+                # Bonus for maintaining L/D above 90% at 10°
+                if falloff_ratio >= 0.9:
+                    bonus = 10.0 * (falloff_ratio - 0.9)  # Small bonus for better performance
+                    if bonus > 0.5:  # Only log significant bonuses
+                        stage_info = "Stage 2" if self.stage1_complete else "Stage 1"
+                        print(f"   [{stage_info}] L/D falloff bonus: {bonus:.1f} (ratio: {falloff_ratio:.3f})")
+                    return -bonus  # Negative penalty = bonus
             
             return 0.0
             
         except Exception as e:
             print(f"Error calculating falloff penalty: {e}")
             return 0.0
+
+    def _enforce_airfoil_mode(self, af512_data: np.ndarray) -> None:
+        """Apply mode-specific constraints to AF512 representation."""
+        if self.airfoil_mode == "symmetric":
+            upper = np.clip(af512_data[:, 0], 0.0, None)
+            af512_data[:, 0] = upper
+            af512_data[:, 1] = -upper
+        elif self.airfoil_mode == "flat":
+            af512_data[:, 0] = np.clip(af512_data[:, 0], 0.0, None)
+            af512_data[:, 1] = 0.0
+        else:
+            af512_data[:, 0] = np.clip(af512_data[:, 0], 0.0, None)
+            af512_data[:, 1] = np.clip(af512_data[:, 1], None, 0.0)
+    
+    def _enforce_mode_on_individual(self, individual: dict) -> None:
+        af512_data = individual.get('af512_data')
+        if af512_data is None:
+            return
+        self._enforce_airfoil_mode(af512_data)
+        af512_data[0, :] = 0.0
     
     def evaluate_population(self):
         print("Evaluating population fitness...")
         for i, individual in enumerate(self.population):
+            self._enforce_mode_on_individual(individual)
             if i % 10 == 0:
                 print(f"   Evaluating individual {i+1}/{len(self.population)}")
             self.evaluate_fitness(individual)
@@ -501,10 +567,13 @@ class GeneticAF512Optimizer:
         x_points = np.linspace(0, 1, self.num_points)
         for af512_data in [af512_1, af512_2]:
             apply_clipping_to_af512(af512_data, x_points)
+            self._enforce_airfoil_mode(af512_data)
             af512_data[0, :] = 0.0
 
         child1['af512_data'] = af512_1
         child2['af512_data'] = af512_2
+        self._enforce_mode_on_individual(child1)
+        self._enforce_mode_on_individual(child2)
         
         child1['fitness'] = None
         child2['fitness'] = None
@@ -531,21 +600,23 @@ class GeneticAF512Optimizer:
         
         x_points = np.linspace(0, 1, self.num_points)
         apply_clipping_to_af512(af512_data, x_points)
-        
-        af512_data[0, :] = 0.0
+        self._enforce_mode_on_individual(individual)
         
         from scipy.ndimage import gaussian_filter1d
         af512_data[:, 0] = gaussian_filter1d(af512_data[:, 0], sigma=3)
         af512_data[:, 1] = gaussian_filter1d(af512_data[:, 1], sigma=3)
 
         apply_clipping_to_af512(af512_data, x_points)
-        af512_data[0, :] = 0.0
+        self._enforce_mode_on_individual(individual)
         
-        leading_edge_thickness = af512_data[-1, 0] - af512_data[-1, 1]
-        if leading_edge_thickness < 0.01:
-            center = (af512_data[-1, 0] + af512_data[-1, 1]) / 2
-            af512_data[-1, 0] = center + 0.005
-            af512_data[-1, 1] = center - 0.005
+        if self.airfoil_mode == "normal":
+            leading_edge_thickness = af512_data[-1, 0] - af512_data[-1, 1]
+            if leading_edge_thickness < 0.01:
+                center = (af512_data[-1, 0] + af512_data[-1, 1]) / 2
+                af512_data[-1, 0] = center + 0.005
+                af512_data[-1, 1] = center - 0.005
+        
+        self._enforce_mode_on_individual(individual)
         
         individual['fitness'] = None
     
@@ -560,7 +631,7 @@ class GeneticAF512Optimizer:
             
             x_points = np.linspace(0, 1, self.num_points)
             apply_clipping_to_af512(individual['af512_data'], x_points)
-            individual['af512_data'][0, :] = 0.0
+            self._enforce_mode_on_individual(individual)
             
             individual['fitness'] = None
             individual['xy_coordinates'] = None
@@ -610,7 +681,9 @@ class GeneticAF512Optimizer:
         new_population = []
         
         best_individual = max(self.population, key=lambda x: x['fitness'])
-        new_population.append(copy.deepcopy(best_individual))
+        elite = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(elite)
+        new_population.append(elite)
         
         while len(new_population) < self.population_size:
             parent1, parent2 = self.select_parents()
@@ -630,7 +703,9 @@ class GeneticAF512Optimizer:
         new_population = []
         
         best_individual = max(self.population, key=lambda x: x['fitness'])
-        new_population.append(copy.deepcopy(best_individual))
+        elite = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(elite)
+        new_population.append(elite)
         
         while len(new_population) < self.population_size:
             parent1, parent2 = self.select_parents()
@@ -722,6 +797,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 1 final airfoil for comparison
         self.stage1_final_airfoil = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(self.stage1_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 1 COMPLETE: Peak L/D = {self.stage1_best_peak_ld:.3f}")
@@ -792,6 +868,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 2 final airfoil for comparison
         self.stage2_final_airfoil = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(self.stage2_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 2 COMPLETE: Peak CL = {self.stage2_best_peak_cl:.3f}")
@@ -863,6 +940,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 3 final airfoil for comparison
         self.stage3_final_airfoil = copy.deepcopy(best_individual)
+        self._enforce_mode_on_individual(self.stage3_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 3 COMPLETE: Average CL = {self.stage3_best_avg_cl:.3f}")
@@ -931,6 +1009,7 @@ class GeneticAF512Optimizer:
         # Final evaluation
         self.evaluate_population()
         final_best = max(self.population, key=lambda x: x['fitness'])
+        self._enforce_mode_on_individual(final_best)
         
         print(f"\nOptimization Complete!")
         print(f"Stage 1: Peak L/D = {self.stage1_best_peak_ld:.3f}")
