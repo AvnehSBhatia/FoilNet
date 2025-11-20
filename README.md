@@ -15,7 +15,16 @@ The tool uses a neural network trained on NACA airfoil data to convert between d
 3. Stage 3: Average CL over ±4° range optimization
 4. Stage 4: Average L/D over ±4° range optimization
 
+or if opting for CL first, stages 1 and 2, and 3 and 4 will be flipped.
+
 Each stage preserves previous achievements within 2% tolerance.
+
+## New developments
+
+1. Custom thicknesses can be configured on line 12 for both files. (Can be multiple)
+2. Fuselage profile can now be achieved through setting the aformentioned custom thicknesses
+3. CL first mode is now released. In my limited testing, CL first seems to generate the best profiles, even generating superior L/D in many cases.
+
 
 ## Requirements
 
