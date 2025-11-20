@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from naca_trainer import AF512toXYNet, predict_xy_coordinates, naca_to_af512, naca4_digit_to_coordinates
+from naca_trainer import AF512toXYNet, predict_xy, naca_to_af, naca4_to_xy
 import random
 import copy
 from typing import List, Tuple, Optional
@@ -9,7 +9,7 @@ import json
 import os
 
 CUSTOM_CLIP_RANGES: Optional[List[dict]] = [
-    {'x_range': (0.2, 0.8), 'top_clip': (0.08, 0.1), 'bottom_clip': (0.05, 0.1)},
+    {'x_range': (0.0, 1.0), 'top_clip': (0.001, 0.36), 'bottom_clip': (0.001, 0.36)},
 ]
 # User-adjustable alpha (angle of attack) settings
 ALPHA_RANGE: Tuple[float, float] = (-10, 20)  # (min_alpha, max_alpha) in degrees
@@ -160,7 +160,7 @@ class GeneticAF512Optimizer:
         self.stage2_final_airfoil = None
         self.stage3_final_airfoil = None
         
-    def create_individual(self) -> dict:
+    def make_individual(self) -> dict:
         x_points = np.linspace(0, 1, self.num_points)
         
         thickness = np.random.uniform(0.08, 0.16)
@@ -200,10 +200,10 @@ class GeneticAF512Optimizer:
             'xy_coordinates': None,
             'aerodynamic_data': None
         }
-        self._enforce_mode_on_individual(individual)
+        self._apply_mode_to_ind(individual)
         return individual
     
-    def create_individual_from_airfoil(self, airfoil_code: str) -> dict:
+    def make_from_code(self, airfoil_code: str) -> dict:
         """Create individual from airfoil code (supports both NACA and Selig formats)"""
         try:
             from naca_trainer import airfoil_to_af512
@@ -214,27 +214,27 @@ class GeneticAF512Optimizer:
                 'xy_coordinates': None,
                 'aerodynamic_data': None
             }
-            self._enforce_mode_on_individual(individual)
+            self._apply_mode_to_ind(individual)
             return individual
         except Exception as e:
             print(f"Error creating from airfoil {airfoil_code}: {e}")
-            return self.create_individual()
+            return self.make_individual()
     
-    def create_individual_from_naca(self, naca_code: str) -> dict:
-        """Legacy method - now calls create_individual_from_airfoil"""
-        return self.create_individual_from_airfoil(naca_code)
+    def make_from_naca(self, naca_code: str) -> dict:
+        """Legacy method - now calls make_from_code"""
+        return self.make_from_code(naca_code)
     
-    def initialize_population(self, initial_naca: str = None):
+    def init_population(self, initial_naca: str = None):
         print(f"Initializing population of {self.population_size} individuals...")
-        self.population = [self.create_individual() for _ in range(self.population_size)]
+        self.population = [self.make_individual() for _ in range(self.population_size)]
         
         if initial_naca:
             print(f"Using initial NACA: {initial_naca}")
-            self.population[0] = self.create_individual_from_naca(initial_naca)
+            self.population[0] = self.make_from_naca(initial_naca)
     
-    def af512_to_xy_coordinates(self, af512_data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def af512_to_xy(self, af512_data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         try:
-            pred_x, pred_y = predict_xy_coordinates(self.model, af512_data, self.device)
+            pred_x, pred_y = predict_xy(self.model, af512_data, self.device)
             
             pred_x = np.clip(pred_x, 0, 1)
             
@@ -246,7 +246,7 @@ class GeneticAF512Optimizer:
             y = np.zeros_like(x)
             return x, y
     
-    def evaluate_aerodynamics(self, x_coords: np.ndarray, y_coords: np.ndarray) -> dict:
+    def eval_aero(self, x_coords: np.ndarray, y_coords: np.ndarray) -> dict:
         try:
             coords = np.column_stack([x_coords, y_coords])
             
@@ -337,23 +337,23 @@ class GeneticAF512Optimizer:
                 'average_ld_0_to_12_5': 0.0
             }
     
-    def evaluate_fitness(self, individual: dict) -> float:
+    def eval_fitness(self, individual: dict) -> float:
         try:
-            self._enforce_mode_on_individual(individual)
-            x_coords, y_coords = self.af512_to_xy_coordinates(individual['af512_data'])
+            self._apply_mode_to_ind(individual)
+            x_coords, y_coords = self.af512_to_xy(individual['af512_data'])
             individual['xy_coordinates'] = (x_coords, y_coords)
             
-            aero_data = self.evaluate_aerodynamics(x_coords, y_coords)
+            aero_data = self.eval_aero(x_coords, y_coords)
             individual['aerodynamic_data'] = aero_data
             
             if self.target_lift is not None:
                 if aero_data['CL'] >= self.target_lift:
-                    fitness = self._calculate_adaptive_fitness(aero_data)
+                    fitness = self._stage_fitness(aero_data)
                 else:
                     lift_penalty = (self.target_lift - aero_data['CL']) * 1000
                     fitness = -lift_penalty
             else:
-                fitness = self._calculate_adaptive_fitness(aero_data)
+                fitness = self._stage_fitness(aero_data)
             
             individual['fitness'] = fitness
             return fitness
@@ -363,7 +363,7 @@ class GeneticAF512Optimizer:
             individual['fitness'] = 0.0
             return 0.0
     
-    def _calculate_adaptive_fitness(self, aero_data: dict) -> float:
+    def _stage_fitness(self, aero_data: dict) -> float:
         if not self.stage1_complete:
             # Stage 1: Optimize for peak L/D only
             return aero_data['L/D']
@@ -449,7 +449,7 @@ class GeneticAF512Optimizer:
                 penalty_factor = 0.01  # Very strong penalty
                 return min(current_peak_ld, current_peak_cl) * penalty_factor
     
-    def _calculate_falloff_penalty(self, aero_data: dict) -> float:
+    def _falloff_penalty(self, aero_data: dict) -> float:
         """Calculate penalty for aggressive L/D falloff beyond peak"""
         try:
             # Get L/D values at different angles of attack
@@ -503,7 +503,7 @@ class GeneticAF512Optimizer:
             print(f"Error calculating falloff penalty: {e}")
             return 0.0
 
-    def _enforce_airfoil_mode(self, af512_data: np.ndarray) -> None:
+    def _apply_mode(self, af512_data: np.ndarray) -> None:
         """Apply mode-specific constraints to AF512 representation."""
         if self.airfoil_mode == "symmetric":
             upper = np.clip(af512_data[:, 0], 0.0, None)
@@ -516,22 +516,22 @@ class GeneticAF512Optimizer:
             af512_data[:, 0] = np.clip(af512_data[:, 0], 0.0, None)
             af512_data[:, 1] = np.clip(af512_data[:, 1], None, 0.0)
     
-    def _enforce_mode_on_individual(self, individual: dict) -> None:
+    def _apply_mode_to_ind(self, individual: dict) -> None:
         af512_data = individual.get('af512_data')
         if af512_data is None:
             return
-        self._enforce_airfoil_mode(af512_data)
+        self._apply_mode(af512_data)
         af512_data[0, :] = 0.0
     
-    def evaluate_population(self):
+    def eval_population(self):
         print("Evaluating population fitness...")
         for i, individual in enumerate(self.population):
-            self._enforce_mode_on_individual(individual)
+            self._apply_mode_to_ind(individual)
             if i % 10 == 0:
                 print(f"   Evaluating individual {i+1}/{len(self.population)}")
-            self.evaluate_fitness(individual)
+            self.eval_fitness(individual)
     
-    def select_parents(self) -> Tuple[dict, dict]:
+    def pick_parents(self) -> Tuple[dict, dict]:
         tournament_size = 3
         
         def tournament_select():
@@ -543,7 +543,7 @@ class GeneticAF512Optimizer:
         
         return parent1, parent2
     
-    def crossover(self, parent1: dict, parent2: dict) -> Tuple[dict, dict]:
+    def blend(self, parent1: dict, parent2: dict) -> Tuple[dict, dict]:
         if random.random() > self.crossover_rate:
             return copy.deepcopy(parent1), copy.deepcopy(parent2)
         
@@ -567,13 +567,13 @@ class GeneticAF512Optimizer:
         x_points = np.linspace(0, 1, self.num_points)
         for af512_data in [af512_1, af512_2]:
             apply_clipping_to_af512(af512_data, x_points)
-            self._enforce_airfoil_mode(af512_data)
+            self._apply_mode(af512_data)
             af512_data[0, :] = 0.0
 
         child1['af512_data'] = af512_1
         child2['af512_data'] = af512_2
-        self._enforce_mode_on_individual(child1)
-        self._enforce_mode_on_individual(child2)
+        self._apply_mode_to_ind(child1)
+        self._apply_mode_to_ind(child2)
         
         child1['fitness'] = None
         child2['fitness'] = None
@@ -600,14 +600,14 @@ class GeneticAF512Optimizer:
         
         x_points = np.linspace(0, 1, self.num_points)
         apply_clipping_to_af512(af512_data, x_points)
-        self._enforce_mode_on_individual(individual)
+        self._apply_mode_to_ind(individual)
         
         from scipy.ndimage import gaussian_filter1d
         af512_data[:, 0] = gaussian_filter1d(af512_data[:, 0], sigma=3)
         af512_data[:, 1] = gaussian_filter1d(af512_data[:, 1], sigma=3)
 
         apply_clipping_to_af512(af512_data, x_points)
-        self._enforce_mode_on_individual(individual)
+        self._apply_mode_to_ind(individual)
         
         if self.airfoil_mode == "normal":
             leading_edge_thickness = af512_data[-1, 0] - af512_data[-1, 1]
@@ -616,11 +616,11 @@ class GeneticAF512Optimizer:
                 af512_data[-1, 0] = center + 0.005
                 af512_data[-1, 1] = center - 0.005
         
-        self._enforce_mode_on_individual(individual)
+        self._apply_mode_to_ind(individual)
         
         individual['fitness'] = None
     
-    def add_noise_to_individual(self, individual, noise_std=0.01):
+    def add_noise(self, individual, noise_std=0.01):
         if 'af512_data' in individual:
             noise = np.random.normal(0, noise_std, individual['af512_data'].shape)
             individual['af512_data'] += noise
@@ -631,20 +631,20 @@ class GeneticAF512Optimizer:
             
             x_points = np.linspace(0, 1, self.num_points)
             apply_clipping_to_af512(individual['af512_data'], x_points)
-            self._enforce_mode_on_individual(individual)
+            self._apply_mode_to_ind(individual)
             
             individual['fitness'] = None
             individual['xy_coordinates'] = None
             individual['aerodynamic_data'] = None
     
-    def add_noise_to_population(self, noise_std=None):
+    def shake_population(self, noise_std=None):
         if noise_std is None:
             noise_std = self.current_noise_std
         print(f"   Adding noise (std={noise_std:.3f}) to population...")
         for individual in self.population:
-            self.add_noise_to_individual(individual, noise_std)
+            self.add_noise(individual, noise_std)
     
-    def adjust_noise_dynamically(self):
+    def tune_noise(self):
         if len(self.fitness_history) < self.stagnation_threshold:
             return
         
@@ -660,7 +660,7 @@ class GeneticAF512Optimizer:
                 if self.current_noise_std != old_noise:
                     print(f"   Stagnation detected - decreasing noise from {old_noise:.3f} to {self.current_noise_std:.3f}")
     
-    def check_adaptive_switch(self):
+    def check_adaptive(self):
         if len(self.fitness_history) < self.adaptive_threshold:
             return
         
@@ -677,18 +677,18 @@ class GeneticAF512Optimizer:
                 self.adaptive_mode = True
                 print(f"   Switching to adaptive optimization mode at generation {len(self.fitness_history)} - no significant improvement in {self.adaptive_threshold} generations")
     
-    def create_next_generation(self):
+    def next_generation(self):
         new_population = []
         
         best_individual = max(self.population, key=lambda x: x['fitness'])
         elite = copy.deepcopy(best_individual)
-        self._enforce_mode_on_individual(elite)
+        self._apply_mode_to_ind(elite)
         new_population.append(elite)
         
         while len(new_population) < self.population_size:
-            parent1, parent2 = self.select_parents()
+            parent1, parent2 = self.pick_parents()
             
-            child1, child2 = self.crossover(parent1, parent2)
+            child1, child2 = self.blend(parent1, parent2)
             
             self.mutate(child1)
             self.mutate(child2)
@@ -697,20 +697,20 @@ class GeneticAF512Optimizer:
         
         self.population = new_population[:self.population_size]
         
-        self.add_noise_to_population()
+        self.shake_population()
     
-    def create_next_generation_stage2(self):
+    def next_generation_stage2(self):
         new_population = []
         
         best_individual = max(self.population, key=lambda x: x['fitness'])
         elite = copy.deepcopy(best_individual)
-        self._enforce_mode_on_individual(elite)
+        self._apply_mode_to_ind(elite)
         new_population.append(elite)
         
         while len(new_population) < self.population_size:
-            parent1, parent2 = self.select_parents()
+            parent1, parent2 = self.pick_parents()
             
-            child1, child2 = self.crossover(parent1, parent2)
+            child1, child2 = self.blend(parent1, parent2)
             
             # Mutate children for stage 2 (no noise)
             self.mutate(child1)
@@ -720,9 +720,9 @@ class GeneticAF512Optimizer:
         
         self.population = new_population[:self.population_size]
         # Add 0.5% noise in Stage 2 for exploration
-        self.add_noise_to_population(noise_std=0.005)
+        self.shake_population(noise_std=0.005)
     
-    def run_optimization(self, initial_naca: str = None):
+    def run(self, initial_naca: str = None):
         print("Starting AF512 Genetic Algorithm Optimization")
         print(f"Population size: {self.population_size}")
         print(f"Generations: {self.generations}")
@@ -733,7 +733,7 @@ class GeneticAF512Optimizer:
         print(f"   - Reynolds number: {self.reynolds_number:.0f}")
         print(f"Alpha range: {self.alpha_range}")
         
-        self.initialize_population(initial_naca)
+        self.init_population(initial_naca)
         
         # Stage 1: Optimize for peak L/D
         print(f"\n" + "="*60)
@@ -749,7 +749,7 @@ class GeneticAF512Optimizer:
         for generation in range(self.generations):
             print(f"\nGeneration {generation + 1}/{self.generations}")
             
-            self.evaluate_population()
+            self.eval_population()
             
             fitnesses = [ind['fitness'] for ind in self.population]
             best_fitness = float(max(fitnesses))
@@ -780,7 +780,7 @@ class GeneticAF512Optimizer:
                 'best_individual': copy.deepcopy(best_individual)
             })
             
-            self.adjust_noise_dynamically()
+            self.tune_noise()
             
             if self.image_callback:
                 try:
@@ -789,7 +789,7 @@ class GeneticAF512Optimizer:
                     print(f"Image capture failed for generation {generation + 1}: {e}")
             
             if generation < self.generations - 1:
-                self.create_next_generation()
+                self.next_generation()
         
         # Stage 1 complete - record best peak L/D
         self.stage1_complete = True
@@ -797,7 +797,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 1 final airfoil for comparison
         self.stage1_final_airfoil = copy.deepcopy(best_individual)
-        self._enforce_mode_on_individual(self.stage1_final_airfoil)
+        self._apply_mode_to_ind(self.stage1_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 1 COMPLETE: Peak L/D = {self.stage1_best_peak_ld:.3f}")
@@ -820,7 +820,7 @@ class GeneticAF512Optimizer:
         for generation in range(self.stage2_generations):
             print(f"\nStage 2 Generation {generation + 1}/{self.stage2_generations}")
             
-            self.evaluate_population()
+            self.eval_population()
             
             fitnesses = [ind['fitness'] for ind in self.population]
             best_fitness = float(max(fitnesses))
@@ -860,7 +860,7 @@ class GeneticAF512Optimizer:
             
             if generation < self.stage2_generations - 1:
                 # Create next generation WITHOUT adding noise (clean optimization)
-                self.create_next_generation_stage2()
+                self.next_generation_stage2()
         
         # Stage 2 complete - record best peak CL
         self.stage2_complete = True
@@ -868,7 +868,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 2 final airfoil for comparison
         self.stage2_final_airfoil = copy.deepcopy(best_individual)
-        self._enforce_mode_on_individual(self.stage2_final_airfoil)
+        self._apply_mode_to_ind(self.stage2_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 2 COMPLETE: Peak CL = {self.stage2_best_peak_cl:.3f}")
@@ -892,7 +892,7 @@ class GeneticAF512Optimizer:
         for generation in range(self.stage3_generations):
             print(f"\nStage 3 Generation {generation + 1}/{self.stage3_generations}")
             
-            self.evaluate_population()
+            self.eval_population()
             
             fitnesses = [ind['fitness'] for ind in self.population]
             best_fitness = float(max(fitnesses))
@@ -932,7 +932,7 @@ class GeneticAF512Optimizer:
             
             if generation < self.stage3_generations - 1:
                 # Create next generation WITHOUT adding noise (clean optimization)
-                self.create_next_generation_stage2()
+                self.next_generation_stage2()
         
         # Stage 3 complete - record best average CL
         self.stage3_complete = True
@@ -940,7 +940,7 @@ class GeneticAF512Optimizer:
         
         # Store the Stage 3 final airfoil for comparison
         self.stage3_final_airfoil = copy.deepcopy(best_individual)
-        self._enforce_mode_on_individual(self.stage3_final_airfoil)
+        self._apply_mode_to_ind(self.stage3_final_airfoil)
         
         print(f"\n" + "="*60)
         print(f"STAGE 3 COMPLETE: Average CL = {self.stage3_best_avg_cl:.3f}")
@@ -964,7 +964,7 @@ class GeneticAF512Optimizer:
         for generation in range(self.stage4_generations):
             print(f"\nStage 4 Generation {generation + 1}/{self.stage4_generations}")
             
-            self.evaluate_population()
+            self.eval_population()
             
             fitnesses = [ind['fitness'] for ind in self.population]
             best_fitness = float(max(fitnesses))
@@ -1004,12 +1004,12 @@ class GeneticAF512Optimizer:
             
             if generation < self.stage4_generations - 1:
                 # Create next generation WITHOUT adding noise (clean optimization)
-                self.create_next_generation_stage2()
+                self.next_generation_stage2()
         
         # Final evaluation
-        self.evaluate_population()
+        self.eval_population()
         final_best = max(self.population, key=lambda x: x['fitness'])
-        self._enforce_mode_on_individual(final_best)
+        self._apply_mode_to_ind(final_best)
         
         print(f"\nOptimization Complete!")
         print(f"Stage 1: Peak L/D = {self.stage1_best_peak_ld:.3f}")
@@ -1044,7 +1044,7 @@ class GeneticAF512Optimizer:
         
         return final_best
     
-    def plot_optimization_history(self):
+    def plot_history(self):
         if not self.fitness_history:
             print("No optimization history to plot")
             return
@@ -1102,11 +1102,11 @@ class GeneticAF512Optimizer:
         plt.savefig('af512_optimization_history.png', dpi=300, bbox_inches='tight')
         plt.show()
     
-    def get_stage1_final_airfoil(self):
+    def stage1_airfoil(self):
         """Get the final airfoil from Stage 1 (non-area optimized) for comparison"""
         return self.stage1_final_airfoil
     
-    def get_early_stopping_stats(self):
+    def early_stop_stats(self):
         if not self.fitness_history:
             return None
         
@@ -1137,10 +1137,10 @@ class GeneticAF512Optimizer:
             'stage2_best_fitness': stage2_best,
             'peak_ld_preserved': (self.stage1_best_peak_ld > 0 and 
                                 stage2_best >= self.stage1_best_peak_ld * self.peak_ld_preservation_threshold),
-            'stage1_final_airfoil': self.get_stage1_final_airfoil()
+            'stage1_final_airfoil': self.stage1_airfoil()
         }
     
-    def save_results(self, filename: str = 'af512_optimization_results.json'):
+    def save_report(self, filename: str = 'af512_optimization_results.json'):
         if not self.fitness_history:
             print("No results to save")
             return
@@ -1216,16 +1216,16 @@ def main():
         airspeed=30.0
     )
     
-    best_airfoil = optimizer.run_optimization(initial_naca)
+    best_airfoil = optimizer.run(initial_naca)
     
-    optimizer.plot_optimization_history()
+    optimizer.plot_history()
     
-    optimizer.save_results()
+    optimizer.save_report()
     
     if initial_naca:
         print(f"\nComparison:")
-        initial_individual = optimizer.create_individual_from_naca(initial_naca)
-        initial_fitness = optimizer.evaluate_fitness(initial_individual)
+        initial_individual = optimizer.make_from_naca(initial_naca)
+        initial_fitness = optimizer.eval_fitness(initial_individual)
         print(f"Initial NACA {initial_naca}: L/D = {initial_fitness:.3f}")
         print(f"Optimized AF512: L/D = {best_airfoil['fitness']:.3f}")
         improvement = ((best_airfoil['fitness'] - initial_fitness) / initial_fitness) * 100

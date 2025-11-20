@@ -8,7 +8,13 @@ import math
 import time
 import os
 
-def naca4_digit_to_coordinates(naca_code, num_points=500):
+DATA_CACHE = {
+    "af512": "training_af512_data.npy",
+    "xy": "training_xy_coordinates.npy",
+}
+NOISE_LEVEL = 0.005
+
+def naca4_to_xy(naca_code, num_points=500):
     if len(naca_code) != 4:
         raise ValueError("NACA code must be 4 digits")
     
@@ -49,7 +55,7 @@ def naca4_digit_to_coordinates(naca_code, num_points=500):
     
     return x_coords, y_coords
 
-def airfoil_to_af512(airfoil_code, num_points=512):
+def code_to_af(airfoil_code, num_points=512):
     """
     Convert airfoil code to AF512 format.
     Supports both NACA (e.g., '2412') and Selig (e.g., 'sg6043') formats.
@@ -58,12 +64,12 @@ def airfoil_to_af512(airfoil_code, num_points=512):
     
     # Check if it's a Selig format (starts with 'sg' or 'selig')
     if airfoil_code.startswith('sg') or airfoil_code.startswith('selig'):
-        return selig_to_af512(airfoil_code, num_points)
+        return selig_to_af(airfoil_code, num_points)
     else:
         # Assume it's a NACA format
-        return naca_to_af512(airfoil_code, num_points)
+        return naca_to_af(airfoil_code, num_points)
 
-def selig_to_af512(selig_code, num_points=512):
+def selig_to_af(selig_code, num_points=512):
     """
     Convert Selig format airfoil code to AF512 format.
     Selig codes like 'sg6043' represent specific airfoil designs.
@@ -94,15 +100,15 @@ def selig_to_af512(selig_code, num_points=512):
         lower_y[-1] = 0.0
         
         # Convert to AF512 format
-        return naca_to_af512_from_coordinates(x_coords, upper_y, num_points)
+        return coords_to_af(x_coords, upper_y, num_points)
         
     except Exception as e:
         print(f"Error converting Selig {selig_code} to AF512: {e}")
         # Fallback to default airfoil
-        return naca_to_af512("0012", num_points)
+        return naca_to_af("0012", num_points)
 
-def naca_to_af512(naca_code, num_points=512):
-    x_coords, y_coords = naca4_digit_to_coordinates(naca_code, num_points*2)
+def naca_to_af(naca_code, num_points=512):
+    x_coords, y_coords = naca4_to_xy(naca_code, num_points*2)
     
     mid_point = len(x_coords) // 2
     upper_x = x_coords[:mid_point]
@@ -124,7 +130,7 @@ def naca_to_af512(naca_code, num_points=512):
     
     return af512_data
 
-def af512_to_coordinates(af512_data):
+def af512_to_xy(af512_data):
     num_points = len(af512_data)
     x_uniform = np.linspace(0, 1, num_points)
     
@@ -136,7 +142,7 @@ def af512_to_coordinates(af512_data):
     
     return x_coords, y_coords
 
-def naca_to_af512_from_coordinates(x_coords, y_coords, num_points=512):
+def coords_to_af(x_coords, y_coords, num_points=512):
     mid_point = len(x_coords) // 2
     upper_x = x_coords[:mid_point]
     upper_y = y_coords[:mid_point]
@@ -157,7 +163,7 @@ def naca_to_af512_from_coordinates(x_coords, y_coords, num_points=512):
     
     return af512_data
 
-def generate_balanced_naca_combinations(num_samples, m_range, p_range, t_range):
+def build_balanced_codes(num_samples, m_range, p_range, t_range):
     all_combinations = []
     for m in m_range:
         for p in p_range:
@@ -199,7 +205,7 @@ def generate_balanced_naca_combinations(num_samples, m_range, p_range, t_range):
     
     return selected_combinations[:num_samples]
 
-def generate_balanced_naca_combinations_repeated(num_samples, m_range, p_range, t_range):
+def build_balanced_codes_repeated(num_samples, m_range, p_range, t_range):
     total_combinations = len(m_range) * len(p_range) * len(t_range)
     repeats_needed = (num_samples // total_combinations) + 1
     
@@ -209,7 +215,7 @@ def generate_balanced_naca_combinations_repeated(num_samples, m_range, p_range, 
         if len(selected_combinations) >= num_samples:
             break
             
-        repeat_combinations = generate_balanced_naca_combinations(
+        repeat_combinations = build_balanced_codes(
             min(total_combinations, num_samples - len(selected_combinations)), 
             m_range, p_range, t_range
         )
@@ -217,9 +223,9 @@ def generate_balanced_naca_combinations_repeated(num_samples, m_range, p_range, 
     
     return selected_combinations[:num_samples]
 
-def generate_training_data(num_samples=10000, num_points=512):
-    af512_file = 'training_af512_data.npy'
-    xy_file = 'training_xy_coordinates.npy'
+def build_training_data(num_samples=10000, num_points=512):
+    af512_file = DATA_CACHE["af512"]
+    xy_file = DATA_CACHE["xy"]
     
     if os.path.exists(af512_file) and os.path.exists(xy_file) and not FORCE_REGENERATE_DATA:
         af512_data = np.load(af512_file)
@@ -229,18 +235,18 @@ def generate_training_data(num_samples=10000, num_points=512):
     af512_data = []
     xy_coordinates = []
     
-    naca_af512, naca_xy = generate_naca_training_data(num_samples, num_points)
+    naca_af512, naca_xy = build_naca_training(num_samples, num_points)
     af512_data.extend(naca_af512)
     xy_coordinates.extend(naca_xy)
     
     clean_af512_data = af512_data.copy()
     clean_xy_coordinates = xy_coordinates.copy()
     
-    af512_data = add_noise_to_training_data(af512_data, noise_level=0.005)
+    af512_data = add_data_noise(af512_data, noise_level=NOISE_LEVEL)
     
     return np.array(af512_data), np.array(xy_coordinates)
 
-def add_noise_to_training_data(data, noise_level=0.005):
+def add_data_noise(data, noise_level=NOISE_LEVEL):
     if isinstance(data, list):
         data = np.array(data)
     
@@ -250,13 +256,13 @@ def add_noise_to_training_data(data, noise_level=0.005):
     
     return noisy_data
 
-def analyze_class_distribution(af512_data, xy_coordinates):
+def analyze_class_spread(af512_data, xy_coordinates):
     pass
 
-def analyze_naca_distribution(num_samples):
+def analyze_naca_spread(num_samples):
     pass
 
-def create_balanced_train_val_split(af512_data, xy_coordinates, test_size=0.2, random_state=42):
+def make_train_val_split(af512_data, xy_coordinates, test_size=0.2, random_state=42):
     np.random.seed(random_state)
     
     n_samples = len(af512_data)
@@ -274,11 +280,11 @@ def create_balanced_train_val_split(af512_data, xy_coordinates, test_size=0.2, r
     train_xy = xy_coordinates[train_indices]
     val_xy = xy_coordinates[val_indices]
     
-    train_af512 = add_noise_to_training_data(train_af512, noise_level=0.005)
+    train_af512 = add_data_noise(train_af512, noise_level=NOISE_LEVEL)
     
     return train_af512, val_af512, train_xy, val_xy
 
-def generate_naca_training_data(num_samples, num_points=512):
+def build_naca_training(num_samples, num_points=512):
     af512_data = []
     xy_coordinates = []
     
@@ -302,9 +308,9 @@ def generate_naca_training_data(num_samples, num_points=512):
     t_range = sorted(list(set(t_range)))
     
     if num_samples <= len(m_range) * len(p_range) * len(t_range):
-        selected_combinations = generate_balanced_naca_combinations(num_samples, m_range, p_range, t_range)
+        selected_combinations = build_balanced_codes(num_samples, m_range, p_range, t_range)
     else:
-        selected_combinations = generate_balanced_naca_combinations_repeated(num_samples, m_range, p_range, t_range)
+        selected_combinations = build_balanced_codes_repeated(num_samples, m_range, p_range, t_range)
     
     valid_samples = 0
     for i, (m, p, t) in enumerate(selected_combinations):
@@ -322,13 +328,13 @@ def generate_naca_training_data(num_samples, num_points=512):
             naca_code_2 = f"{m}{p}{t_next_clamped:02d}"
             
             try:
-                x1, y1 = naca4_digit_to_coordinates(naca_code_1, num_points*2)
-                x2, y2 = naca4_digit_to_coordinates(naca_code_2, num_points*2)
+                x1, y1 = naca4_to_xy(naca_code_1, num_points*2)
+                x2, y2 = naca4_to_xy(naca_code_2, num_points*2)
                 
                 x_coords = x1 * (1 - t_frac) + x2 * t_frac
                 y_coords = y1 * (1 - t_frac) + y2 * t_frac
                 
-                af512 = naca_to_af512_from_coordinates(x_coords, y_coords, num_points)
+                af512 = coords_to_af(x_coords, y_coords, num_points)
                 
                 if af512.shape == (num_points, 2) and not np.any(np.isnan(af512)) and len(x_coords) == num_points*2:
                     af512_data.append(af512.flatten())
@@ -346,9 +352,9 @@ def generate_naca_training_data(num_samples, num_points=512):
             naca_code = f"{m}{p}{t_int:02d}"
             
             try:
-                af512 = naca_to_af512(naca_code, num_points)
+                af512 = naca_to_af(naca_code, num_points)
                 
-                x_coords, y_coords = naca4_digit_to_coordinates(naca_code, num_points*2)
+                x_coords, y_coords = naca4_to_xy(naca_code, num_points*2)
                 
                 if af512.shape == (num_points, 2) and not np.any(np.isnan(af512)) and len(x_coords) == num_points*2:
                     af512_data.append(af512.flatten())
@@ -365,7 +371,7 @@ def generate_naca_training_data(num_samples, num_points=512):
 
 class AF512toXYDataset(Dataset):
     
-    def __init__(self, af512_data, xy_coordinates, add_noise=False, noise_level=0.005):
+    def __init__(self, af512_data, xy_coordinates, add_noise=False, noise_level=NOISE_LEVEL):
         self.af512_data = af512_data
         self.xy_coordinates = xy_coordinates
         self.add_noise = add_noise
@@ -408,7 +414,7 @@ class AF512toXYNet(nn.Module):
         return self.network(x)
 
 
-def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0.001, device='mps'):
+def train_net(model, train_loader, val_loader, num_epochs=100, learning_rate=0.001, device='mps'):
     model = model.to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -457,7 +463,7 @@ def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0
     
     return train_losses, val_losses
 
-def predict_xy_coordinates(model, af512_data, device='mps'):
+def predict_xy(model, af512_data, device='mps'):
     model.eval()
     with torch.no_grad():
         if af512_data.ndim == 2:
@@ -483,7 +489,7 @@ def main():
     else:
         device = torch.device('cpu')
     print(f"Using device: {device}")
-    af512_data, xy_coordinates = generate_training_data(
+    af512_data, xy_coordinates = build_training_data(
         num_samples=NUM_SAMPLES, 
         num_points=512
     )
@@ -491,11 +497,11 @@ def main():
     np.save('training_af512_data.npy', af512_data)
     np.save('training_xy_coordinates.npy', xy_coordinates)
     
-    train_af512, val_af512, train_xy, val_xy = create_balanced_train_val_split(
+    train_af512, val_af512, train_xy, val_xy = make_train_val_split(
         af512_data, xy_coordinates, test_size=0.2, random_state=42
     )
     
-    train_dataset = AF512toXYDataset(train_af512, train_xy, add_noise=True, noise_level=0.005)
+    train_dataset = AF512toXYDataset(train_af512, train_xy, add_noise=True, noise_level=NOISE_LEVEL)
     val_dataset = AF512toXYDataset(val_af512, val_xy, add_noise=False)
     
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
@@ -521,7 +527,7 @@ def main():
     else:
         model = AF512toXYNet(input_size=1024, output_size=2048, hidden_sizes=[512, 256, 128,256,512])
         
-        train_losses, val_losses = train_model(
+        train_losses, val_losses = train_net(
             model, train_loader, val_loader, 
             num_epochs=100, learning_rate=0.001, device=device
         )
