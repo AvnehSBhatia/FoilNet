@@ -9,10 +9,10 @@ import json
 import os
 
 CUSTOM_CLIP_RANGES: Optional[List[dict]] = [
-    {'x_range': (0.0, 1.0), 'top_clip': (0.001, 0.36), 'bottom_clip': (0.001, 0.36)},
+    {'x_range': (0.0, 1.0), 'top_clip': (0.0, 0.36), 'bottom_clip': (0.0, 0.36)},
 ]
 # User-adjustable alpha (angle of attack) settings
-ALPHA_RANGE: Tuple[float, float] = (-10, 20)  # (min_alpha, max_alpha) in degrees
+ALPHA_RANGE: Tuple[float, float] = (-5, 15)  # (min_alpha, max_alpha) in degrees
 ALPHA_INCREMENT: float = 1  # Increment in degrees (e.g., 0.1, 0.5, 1.0)
 
 AIRFOIL_MODES: Tuple[str, ...] = ("normal", "symmetric", "flat")
@@ -60,6 +60,59 @@ def apply_clipping_to_af512(
     x_points: np.ndarray
 ) -> None:
     apply_surface_clipping(af512_data[:, 0], af512_data[:, 1], x_points)
+
+def apply_clipping_to_xy(
+    x_coords: np.ndarray,
+    y_coords: np.ndarray
+) -> None:
+    """Apply clipping constraints directly to XY coordinates based on X position."""
+    # Apply default clipping first
+    default_top_min, default_top_max = 0.001, 0.16
+    default_bottom_min, default_bottom_max = -0.16, -0.001
+    
+    # Clip upper surface (y > 0)
+    upper_mask = y_coords > 0
+    y_coords[upper_mask] = np.clip(y_coords[upper_mask], default_top_min, default_top_max)
+    
+    # Clip lower surface (y < 0)
+    lower_mask = y_coords < 0
+    y_coords[lower_mask] = np.clip(y_coords[lower_mask], default_bottom_min, default_bottom_max)
+    
+    # Apply custom clipping ranges (overrides defaults in those regions)
+    if CUSTOM_CLIP_RANGES:
+        for clip_config in CUSTOM_CLIP_RANGES:
+            x_min, x_max = clip_config['x_range']
+            top_clip_min, top_clip_max = clip_config['top_clip']
+            bottom_clip_min, bottom_clip_max = clip_config['bottom_clip']
+            
+            # Find points within the X range
+            x_mask = (x_coords >= x_min) & (x_coords <= x_max)
+            if np.any(x_mask):
+                # Apply to upper surface points in this range
+                upper_in_range = x_mask & upper_mask
+                if np.any(upper_in_range):
+                    y_coords[upper_in_range] = np.clip(y_coords[upper_in_range], top_clip_min, top_clip_max)
+                
+                # Apply to lower surface points in this range
+                lower_in_range = x_mask & lower_mask
+                if np.any(lower_in_range):
+                    y_coords[lower_in_range] = np.clip(y_coords[lower_in_range], -bottom_clip_max, -bottom_clip_min)
+        return
+    
+    # Legacy single-range support for backwards compatibility
+    legacy_x_range = globals().get('CUSTOM_CLIP_X_RANGE')
+    legacy_limits = globals().get('CUSTOM_CLIP_LIMITS')
+    if legacy_x_range and legacy_limits:
+        x_min, x_max = legacy_x_range
+        clip_min, clip_max = legacy_limits
+        x_mask = (x_coords >= x_min) & (x_coords <= x_max)
+        if np.any(x_mask):
+            upper_in_range = x_mask & upper_mask
+            if np.any(upper_in_range):
+                y_coords[upper_in_range] = np.clip(y_coords[upper_in_range], clip_min, clip_max)
+            lower_in_range = x_mask & lower_mask
+            if np.any(lower_in_range):
+                y_coords[lower_in_range] = np.clip(y_coords[lower_in_range], -clip_max, -clip_min)
 
 try:
     import neuralfoil
@@ -163,41 +216,134 @@ class GeneticAF512Optimizer:
     def make_individual(self) -> dict:
         x_points = np.linspace(0, 1, self.num_points)
         
-        thickness = np.random.uniform(0.08, 0.16)
-        thickness_pos = np.random.uniform(0.2, 0.8)
-        
-        a = 0.3 + 0.4 * (1 - abs(thickness_pos - 0.5) / 0.5)
-        b = thickness / 2
-        
-        thickness_dist = np.zeros(self.num_points)
-        for i, x in enumerate(x_points):
-            dx = (x - thickness_pos) / a
-            if abs(dx) <= 1:
-                thickness_dist[i] = b * np.sqrt(1 - dx**2)
-            else:
-                thickness_dist[i] = 0
-        
-        upper_dist = thickness_dist
-        lower_dist = -thickness_dist
-        
-        apply_surface_clipping(upper_dist, lower_dist, x_points)
-        
-        upper_dist[0] = 0.0
-        lower_dist[0] = 0.0
-        
-        if self.airfoil_mode == "normal":
-            leading_edge_thickness = upper_dist[-1] - lower_dist[-1]
-            if leading_edge_thickness < 0.01:
-                center = (upper_dist[-1] + lower_dist[-1]) / 2
-                upper_dist[-1] = center + 0.005
-                lower_dist[-1] = center - 0.005
-        
-        af512_data = np.column_stack([upper_dist, lower_dist])
+        # Check if clipping is enabled
+        if CUSTOM_CLIP_RANGES and len(CUSTOM_CLIP_RANGES) > 0:
+            # Create straight lines in XY coordinates, then convert to AF512
+            clip_config = CUSTOM_CLIP_RANGES[0]  # Use first clipping range
+            x_min, x_max = clip_config['x_range']
+            top_clip_min, top_clip_max = clip_config['top_clip']
+            bottom_clip_min, bottom_clip_max = clip_config['bottom_clip']
+            
+            # Use the maximum values to draw from the edges of the clipping box
+            top_boundary = top_clip_max  # Top edge of the box
+            bottom_boundary = -bottom_clip_min  # Bottom edge of the box (negative for lower surface)
+            
+            # Create XY coordinates with straight lines
+            # Upper surface: from trailing edge (1,0) to leading edge (0,0)
+            # Lower surface: from leading edge (0,0) to trailing edge (1,0)
+            num_xy_points = self.num_points * 2  # Full airfoil has 2x points
+            
+            # Upper surface X coordinates (trailing to leading)
+            upper_x = np.linspace(1.0, 0.0, self.num_points)
+            upper_y = np.zeros(self.num_points)
+            
+            # Lower surface X coordinates (leading to trailing)
+            lower_x = np.linspace(0.0, 1.0, self.num_points)
+            lower_y = np.zeros(self.num_points)
+            
+            # Build upper surface (trailing to leading)
+            for i, x in enumerate(upper_x):
+                if x > x_max:
+                    # Back: linear interpolation from (1, 0) to (x_max, boundary)
+                    if x_max < 1:
+                        t = (x - x_max) / (1 - x_max)
+                        upper_y[i] = top_boundary * (1 - t)
+                    else:
+                        upper_y[i] = 0.0
+                elif x >= x_min:
+                    # Middle: use clipping boundary value
+                    upper_y[i] = top_boundary
+                else:
+                    # Front: linear interpolation from (x_min, boundary) to (0, 0)
+                    if x_min > 0:
+                        t = x / x_min
+                        upper_y[i] = top_boundary * t
+                    else:
+                        upper_y[i] = 0.0
+            
+            # Build lower surface (leading to trailing)
+            for i, x in enumerate(lower_x):
+                if x < x_min:
+                    # Front: linear interpolation from (0, 0) to (x_min, boundary)
+                    if x_min > 0:
+                        t = x / x_min
+                        lower_y[i] = bottom_boundary * t
+                    else:
+                        lower_y[i] = 0.0
+                elif x <= x_max:
+                    # Middle: use clipping boundary value
+                    lower_y[i] = bottom_boundary
+                else:
+                    # Back: linear interpolation from (x_max, boundary) to (1, 0)
+                    if x_max < 1:
+                        t = (x - x_max) / (1 - x_max)
+                        lower_y[i] = bottom_boundary * (1 - t)
+                    else:
+                        lower_y[i] = 0.0
+            
+            # Ensure leading and trailing edges are at zero
+            upper_y[-1] = 0.0  # Leading edge (x=0)
+            lower_y[0] = 0.0   # Leading edge (x=0)
+            upper_y[0] = 0.0   # Trailing edge (x=1)
+            lower_y[-1] = 0.0  # Trailing edge (x=1)
+            
+            # Combine upper and lower surfaces for conversion
+            # Note: For display, we need XY in the format: upper (trailing->leading) + lower (leading->trailing)
+            # But for coords_to_af, we need: upper (trailing->leading) + lower (leading->trailing)
+            x_coords = np.concatenate([upper_x, lower_x])
+            y_coords = np.concatenate([upper_y, lower_y])
+            
+            # Apply clipping to XY coordinates before converting to AF512
+            apply_clipping_to_xy(x_coords, y_coords)
+            
+            # Convert clipped XY coordinates to AF512
+            from naca_trainer import coords_to_af
+            af512_data = coords_to_af(x_coords, y_coords, self.num_points)
+            
+            # Store the original XY coordinates with straight lines for display
+            # Reorder for proper airfoil display: upper (leading->trailing) + lower (leading->trailing)
+            upper_x_display = upper_x[::-1]  # Reverse to go leading->trailing
+            upper_y_display = upper_y[::-1]
+            xy_coords_display = (np.concatenate([upper_x_display, lower_x]), 
+                                 np.concatenate([upper_y_display, lower_y]))
+        else:
+            xy_coords_display = None
+            # Original random initialization
+            thickness = np.random.uniform(0.08, 0.16)
+            thickness_pos = np.random.uniform(0.2, 0.8)
+            
+            a = 0.3 + 0.4 * (1 - abs(thickness_pos - 0.5) / 0.5)
+            b = thickness / 2
+            
+            thickness_dist = np.zeros(self.num_points)
+            for i, x in enumerate(x_points):
+                dx = (x - thickness_pos) / a
+                if abs(dx) <= 1:
+                    thickness_dist[i] = b * np.sqrt(1 - dx**2)
+                else:
+                    thickness_dist[i] = 0
+            
+            upper_dist = thickness_dist
+            lower_dist = -thickness_dist
+            
+            apply_surface_clipping(upper_dist, lower_dist, x_points)
+            
+            upper_dist[0] = 0.0
+            lower_dist[0] = 0.0
+            
+            if self.airfoil_mode == "normal":
+                leading_edge_thickness = upper_dist[-1] - lower_dist[-1]
+                if leading_edge_thickness < 0.01:
+                    center = (upper_dist[-1] + lower_dist[-1]) / 2
+                    upper_dist[-1] = center + 0.005
+                    lower_dist[-1] = center - 0.005
+            
+            af512_data = np.column_stack([upper_dist, lower_dist])
         
         individual = {
             'af512_data': af512_data,
             'fitness': None,
-            'xy_coordinates': None,
+            'xy_coordinates': xy_coords_display if CUSTOM_CLIP_RANGES and len(CUSTOM_CLIP_RANGES) > 0 else None,
             'aerodynamic_data': None
         }
         self._apply_mode_to_ind(individual)
@@ -238,12 +384,16 @@ class GeneticAF512Optimizer:
             
             pred_x = np.clip(pred_x, 0, 1)
             
+            # Apply clipping to XY coordinates
+            apply_clipping_to_xy(pred_x, pred_y)
+            
             return pred_x, pred_y
             
         except Exception as e:
             print(f"Error converting AF512 to coordinates: {e}")
             x = np.linspace(0, 1, self.num_points)
             y = np.zeros_like(x)
+            apply_clipping_to_xy(x, y)
             return x, y
     
     def eval_aero(self, x_coords: np.ndarray, y_coords: np.ndarray) -> dict:
@@ -340,8 +490,16 @@ class GeneticAF512Optimizer:
     def eval_fitness(self, individual: dict) -> float:
         try:
             self._apply_mode_to_ind(individual)
-            x_coords, y_coords = self.af512_to_xy(individual['af512_data'])
-            individual['xy_coordinates'] = (x_coords, y_coords)
+            # Use stored XY coordinates if available (preserves straight-line initialization)
+            # Otherwise generate from AF512 via neural network
+            if individual.get('xy_coordinates') is not None:
+                x_coords, y_coords = individual['xy_coordinates']
+            else:
+                x_coords, y_coords = self.af512_to_xy(individual['af512_data'])
+                individual['xy_coordinates'] = (x_coords, y_coords)
+            
+            # Apply clipping to XY coordinates directly
+            apply_clipping_to_xy(x_coords, y_coords)
             
             aero_data = self.eval_aero(x_coords, y_coords)
             individual['aerodynamic_data'] = aero_data

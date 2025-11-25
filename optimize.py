@@ -608,10 +608,29 @@ def render_airfoil(airfoil_data, generation, fitness, save_path):
     
     x_coords, y_coords = airfoil_data['xy_coordinates']
     
-    ax.plot(x_coords, y_coords, 'b-', linewidth=3, alpha=0.8)
+    # Plot XY coordinates (final airfoil shape)
+    ax.plot(x_coords, y_coords, 'b-', linewidth=3, alpha=0.8, label='XY Shape')
+    
+    # Plot AF512 points if available
+    if 'af512_data' in airfoil_data and airfoil_data['af512_data'] is not None:
+        af512_data = airfoil_data['af512_data']
+        num_points = len(af512_data)
+        x_points = np.linspace(0, 1, num_points)
+        
+        # AF512 represents distance from chord line (y=0)
+        # Upper surface: positive distances
+        # Lower surface: negative distances
+        upper_dist = af512_data[:, 0]
+        lower_dist = af512_data[:, 1]
+        
+        # Plot AF512 points as scatter points
+        ax.scatter(x_points, upper_dist, c='red', s=10, alpha=0.5, label='AF512 Upper', marker='o')
+        ax.scatter(x_points, lower_dist, c='orange', s=10, alpha=0.5, label='AF512 Lower', marker='o')
+    
     ax.set_xlabel('X Coordinate')
     ax.set_ylabel('Y Coordinate')
     ax.set_title(f'Generation {generation} - L/D = {fitness:.3f}')
+    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.axis('equal')
     ax.set_xlim(-0.1, 1.1)
